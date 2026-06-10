@@ -82,13 +82,11 @@
     <model name='workcell'>
       <static>1</static>
       <link name='link'>
-        <visual name='visual'>
-          <geometry>
-            <mesh>
-              <uri>model://workcell/meshes/mesh.dae</uri>
-            </mesh>
-          </geometry>
-        </visual>
+        <!-- 2.1 MB detailed building mesh removed for headless/sim performance:
+             it made the gz single-threaded sim loop ~5x slower (RTF 0.14 vs 0.67),
+             starving the in-sim controller update -> arm goal-time aborts. The box
+             frame visuals below keep the warehouse structure readable. Re-add the
+             <mesh> visual for GUI/figure renders if the full detail is wanted. -->
         <visual name='conveyor_frame_1'>
           <pose>0 -1.21 3 0 -0 0</pose>
           <geometry>
