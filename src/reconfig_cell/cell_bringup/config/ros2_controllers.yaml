@@ -1,0 +1,55 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 500  # Hz
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    joint_trajectory_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+    gripper_controller:
+      type: parallel_gripper_action_controller/GripperActionController
+
+# ── Arm ───────────────────────────────────────────────────────────────────────
+joint_trajectory_controller:
+  ros__parameters:
+    joints:
+      - shoulder_pan_joint
+      - shoulder_lift_joint
+      - elbow_joint
+      - wrist_1_joint
+      - wrist_2_joint
+      - wrist_3_joint
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+      - velocity
+    state_publish_rate: 100.0
+    action_monitor_rate: 20.0
+    allow_partial_joints_goal: false
+    constraints:
+      stopped_velocity_tolerance: 0.0
+      # The gz_ros2_control position interface tracks the commanded trajectory with
+      # large lag in this sim (RTF ~0.67), so an enforced PATH tolerance aborts every
+      # motion mid-path even at 0.5 rad. Disable the path tolerance (0.0) and judge
+      # success only at the end via the goal tolerance, with generous goal_time slack.
+      goal_time: 10.0
+      shoulder_pan_joint:  { trajectory: 0.0, goal: 0.1 }
+      shoulder_lift_joint: { trajectory: 0.0, goal: 0.1 }
+      elbow_joint:         { trajectory: 0.0, goal: 0.1 }
+      wrist_1_joint:       { trajectory: 0.0, goal: 0.1 }
+      wrist_2_joint:       { trajectory: 0.0, goal: 0.1 }
+      wrist_3_joint:       { trajectory: 0.0, goal: 0.1 }
+
+# ── Gripper ───────────────────────────────────────────────────────────────────
+gripper_controller:
+  ros__parameters:
+    joint: finger_left_joint
+    action_monitor_rate: 20.0
+    allow_stalling: false
+    stall_velocity_threshold: 0.001
+    stall_timeout: 1.0
+    goal_tolerance: 0.003
+    max_effort: 20.0

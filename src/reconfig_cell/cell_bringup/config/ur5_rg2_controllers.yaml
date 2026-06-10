@@ -1,0 +1,43 @@
+# gz_ros2_control config for the ur5_rg2 ARM (6 joints only; the RG2 gripper
+# stays fixed/cosmetic — grasp is the DetachableJoint, as in reconfig Step 2).
+# Referenced by absolute path from picknplace ur5_rg2/model.sdf <plugin><parameters>.
+controller_manager:
+  ros__parameters:
+    update_rate: 500  # Hz
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    joint_trajectory_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+# ── Arm ───────────────────────────────────────────────────────────────────────
+joint_trajectory_controller:
+  ros__parameters:
+    joints:
+      - shoulder_pan_joint
+      - shoulder_lift_joint
+      - elbow_joint
+      - wrist_1_joint
+      - wrist_2_joint
+      - wrist_3_joint
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+      - velocity
+    state_publish_rate: 100.0
+    action_monitor_rate: 20.0
+    allow_partial_joints_goal: false
+    constraints:
+      stopped_velocity_tolerance: 0.0
+      # gz_ros2_control position interface lags the commanded path in sim, so an
+      # enforced PATH tolerance aborts every motion mid-path. Disable path tolerance
+      # (0.0); judge success only at the goal, with generous goal_time slack.
+      goal_time: 10.0
+      shoulder_pan_joint:  { trajectory: 0.0, goal: 0.1 }
+      shoulder_lift_joint: { trajectory: 0.0, goal: 0.1 }
+      elbow_joint:         { trajectory: 0.0, goal: 0.1 }
+      wrist_1_joint:       { trajectory: 0.0, goal: 0.1 }
+      wrist_2_joint:       { trajectory: 0.0, goal: 0.1 }
+      wrist_3_joint:       { trajectory: 0.0, goal: 0.1 }

@@ -1,0 +1,42 @@
+<?xml version="1.0" ?>
+<!-- 40 mm dynamic cube for the warehouse cell. Same as cube_part.sdf but the
+     DetachableJoint binds to the picknplace ur5_rg2 (child_model=ur5_rg2). The RG2
+     gripper links are fixed-lumped into wrist_3_link, so welding here == welding at
+     the gripper tip. Grasp/release = publish Empty to attach/detach topics. -->
+<sdf version="1.6">
+  <model name="cube_1">
+    <link name="link">
+      <inertial>
+        <mass>0.05</mass>
+        <inertia>
+          <ixx>1.33e-5</ixx><iyy>1.33e-5</iyy><izz>1.33e-5</izz>
+          <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz>
+        </inertia>
+      </inertial>
+      <collision name="collision">
+        <geometry><box><size>0.04 0.04 0.04</size></box></geometry>
+        <surface>
+          <friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction>
+        </surface>
+      </collision>
+      <visual name="visual">
+        <geometry><box><size>0.04 0.04 0.04</size></box></geometry>
+        <material>
+          <ambient>0.1 0.7 0.2 1</ambient>
+          <diffuse>0.1 0.7 0.2 1</diffuse>
+        </material>
+      </visual>
+    </link>
+
+    <plugin filename="gz-sim-detachable-joint-system"
+            name="gz::sim::systems::DetachableJoint">
+      <parent_link>link</parent_link>
+      <child_model>ur5_rg2</child_model>
+      <child_link>wrist_3_link</child_link>
+      <attach_topic>/cube_1/attach</attach_topic>
+      <detach_topic>/cube_1/detach</detach_topic>
+      <output_topic>/cube_1/state</output_topic>
+      <suppress_child_warning>true</suppress_child_warning>
+    </plugin>
+  </model>
+</sdf>

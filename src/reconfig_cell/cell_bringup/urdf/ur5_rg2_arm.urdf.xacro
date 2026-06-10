@@ -1,0 +1,80 @@
+<?xml version="1.0"?>
+<!-- Arm-only UR5 description used as robot_description for the picknplace ur5_rg2.
+     Purpose: (1) feed MoveIt the standard-UR5 kinematics that ur5_rg2's arm matches
+     exactly, and (2) provide the <ros2_control> block that the gz_ros2_control plugin
+     (declared inside picknplace ur5_rg2/model.sdf) reads to claim the 6 arm joints by
+     name. No gripper here — the RG2 is fixed/cosmetic and grasp is the DetachableJoint. -->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="$(arg name)">
+
+  <xacro:arg name="name"      default="ur"/>
+  <xacro:arg name="ur_type"   default="ur5"/>
+  <xacro:arg name="tf_prefix" default=""/>
+
+  <xacro:arg name="joint_limit_params"
+    default="$(find ur_description)/config/$(arg ur_type)/joint_limits.yaml"/>
+  <xacro:arg name="kinematics_params"
+    default="$(find ur_description)/config/$(arg ur_type)/default_kinematics.yaml"/>
+  <xacro:arg name="physical_params"
+    default="$(find ur_description)/config/$(arg ur_type)/physical_parameters.yaml"/>
+  <xacro:arg name="visual_params"
+    default="$(find ur_description)/config/$(arg ur_type)/visual_parameters.yaml"/>
+
+  <xacro:arg name="safety_limits"     default="false"/>
+  <xacro:arg name="safety_pos_margin" default="0.15"/>
+  <xacro:arg name="safety_k_position" default="20"/>
+
+  <!-- Path to the controllers yaml; injected by the launch (gz_ros2_control <parameters>). -->
+  <xacro:arg name="simulation_controllers" default=""/>
+
+  <xacro:include filename="$(find ur_description)/urdf/ur_macro.xacro"/>
+  <!-- Stock UR gz ros2_control macro — the SAME one the proven step2 stack uses. It
+       exposes position+velocity+effort command interfaces; gz_ros2_control's
+       GazeboSimSystem only actuates the joint when the velocity/effort interfaces are
+       present (a position-only command interface registers but never drives physics —
+       the JTC reference advances while the joint stays frozen). -->
+  <xacro:include filename="$(find ur_simulation_gz)/urdf/ur_gz.ros2_control.xacro"/>
+
+  <link name="world"/>
+
+  <xacro:ur_robot
+    name="$(arg name)"
+    tf_prefix="$(arg tf_prefix)"
+    parent="world"
+    joint_limits_parameters_file="$(arg joint_limit_params)"
+    kinematics_parameters_file="$(arg kinematics_params)"
+    physical_parameters_file="$(arg physical_params)"
+    visual_parameters_file="$(arg visual_params)"
+    safety_limits="$(arg safety_limits)"
+    safety_pos_margin="$(arg safety_pos_margin)"
+    safety_k_position="$(arg safety_k_position)"
+    force_abs_paths="true">
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </xacro:ur_robot>
+
+  <!-- ros2_control on the 6 arm joints via the stock UR gz macro (position+velocity+effort
+       command interfaces; gz_ros2_control needs them to actually drive the joints). The
+       initial_positions spawn the arm already in the compact "up" pose so it never droops
+       into the ground/conveyors during the launch window before the controller activates
+       (a drooped floor-mounted UR5 jams its wrist through the floor -> effort saturates and
+       it can't recover). The JTC then holds this pose from t=0. -->
+  <xacro:ur_ros2_control
+    name="$(arg name)"
+    tf_prefix="$(arg tf_prefix)"
+    initial_positions="${dict(
+      shoulder_pan_joint=0.0,
+      shoulder_lift_joint=-1.5708,
+      elbow_joint=-1.5708,
+      wrist_1_joint=-1.5708,
+      wrist_2_joint=0.0,
+      wrist_3_joint=0.0)}"/>
+
+  <!-- gz_ros2_control plugin (this robot is SPAWNED from URDF via ros_gz_sim create, so the
+       plugin must live in the URDF, not the world SDF). Starts the controller_manager. -->
+  <gazebo>
+    <plugin filename="gz_ros2_control-system"
+            name="gz_ros2_control::GazeboSimROS2ControlPlugin">
+      <parameters>$(arg simulation_controllers)</parameters>
+    </plugin>
+  </gazebo>
+
+</robot>
