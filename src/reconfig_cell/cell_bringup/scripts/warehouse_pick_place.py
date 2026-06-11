@@ -226,7 +226,7 @@ def solve_ik(model, psm, robot, x, y, z, yaw, seed, logger, label, nominal=None)
                 "ur_manipulator",
                 [random.uniform(-math.pi, math.pi) for _ in range(6)])
         state.update()
-        if not state.set_from_ik("ur_manipulator", pose, "tool0", 0.05):
+        if not state.set_from_ik("ur_manipulator", pose, "rg2_tcp", 0.05):
             continue
         state.update()
         q = list(state.get_joint_group_positions("ur_manipulator"))
@@ -311,7 +311,7 @@ def run_diag(moveit, logger, path):
             state.set_joint_group_positions("ur_manipulator",
                                             [UP_SEED[j] for j in UP_SEED])
             state.update()
-            ok = state.set_from_ik("ur_manipulator", pose, "tool0", 0.1)
+            ok = state.set_from_ik("ur_manipulator", pose, "rg2_tcp", 0.1)
             colliding = None
             if ok:
                 with psm.read_only() as scene:

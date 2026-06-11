@@ -73,10 +73,14 @@
     </link>
   </xacro:macro>
 
+  <!-- Mounted on tool0 (the real flange frame: +z = approach axis). The picknplace
+       transforms were in ITS wrist_3 frame, which differs from stock ur_description's,
+       so the gripper floated off the side; re-derived here relative to tool0 so the
+       hand sits flush on the flange with the fingers extending along +z. -->
   <joint name="rg2_hand_joint" type="fixed">
-    <parent link="wrist_3_link"/>
+    <parent link="tool0"/>
     <child link="rg2_hand"/>
-    <origin xyz="0 0.0823 0" rpy="1.570796325 0 1.570796325"/>
+    <origin xyz="0 0 0.0" rpy="0 -1.570796327 3.141592654"/>
   </joint>
   <xacro:rg2_cosmetic_link name="rg2_hand" mesh="hand.dae">
     <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -99,6 +103,17 @@
   <xacro:rg2_cosmetic_link name="rg2_rightfinger" mesh="finger.dae">
     <origin xyz="0 0 0" rpy="3.141592653589793 0 0"/>
   </xacro:rg2_cosmetic_link>
+
+  <!-- Grasp TCP at the RG2 fingertips (picknplace ur5_rg2 tool0 transform): this is the
+       frame the IK drives to the belt, so the FINGERS reach the cube instead of the
+       flange. Its +z axis = the wrist's +y = the gripper approach axis, so the existing
+       top-down quaternion (frame +z -> world -z) makes the gripper point straight down. -->
+  <joint name="rg2_tcp_joint" type="fixed">
+    <parent link="tool0"/>
+    <child link="rg2_tcp"/>
+    <origin xyz="0 0 0.193" rpy="0 0 0"/>
+  </joint>
+  <link name="rg2_tcp"/>
 
   <!-- ros2_control on the 6 arm joints via the stock UR gz macro (position+velocity+effort
        command interfaces; gz_ros2_control needs them to actually drive the joints). The
