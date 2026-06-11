@@ -50,9 +50,11 @@ CELL_X, CELL_Y = "-0.697", "-0.643"
 def launch_setup(context, *args, **kwargs):
     launch_rviz = LaunchConfiguration("launch_rviz")
     gazebo_gui = LaunchConfiguration("gazebo_gui")
-    world_path = LaunchConfiguration("world").perform(context) or CELL_WORLD
-
     bringup_pkg = get_package_share_directory("cell_bringup")
+    # Default to the vendored, arranged world: conveyors fanned at R=0.82 + a 0.40 m
+    # robot pedestal (see cell_arranged.world). Override world:= to use another.
+    default_world = os.path.join(bringup_pkg, "worlds", "cell_arranged.world")
+    world_path = LaunchConfiguration("world").perform(context) or default_world
     controllers_yaml = os.path.join(bringup_pkg, "config", "ur5_rg2_controllers.yaml")
     xacro_file = os.path.join(bringup_pkg, "urdf", "ur5_rg2_arm.urdf.xacro")
 
@@ -105,7 +107,7 @@ def launch_setup(context, *args, **kwargs):
         package="ros_gz_sim", executable="create",
         arguments=["-string", robot_description_content,
                    "-name", "ur5_rg2",
-                   "-x", CELL_X, "-y", CELL_Y, "-z", "0.0",
+                   "-x", CELL_X, "-y", CELL_Y, "-z", "0.40",  # on the pedestal
                    "-allow_renaming", "true"],
         output="screen",
     )

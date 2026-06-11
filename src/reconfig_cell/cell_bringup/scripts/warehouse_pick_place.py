@@ -56,25 +56,34 @@ CELL_X, CELL_Y = -0.697, -0.643
 
 # Delivery conveyors: world (x, y) of the model origin == belt centre in plan view.
 CONVEYORS_WORLD = {
-    1: (-1.22, -0.34),
-    2: (-0.697, -0.043),
-    3: (-0.18, -0.34),
+    1: (-1.44596, -0.364014),  # user-placed: bearing 160 deg, R=0.80
+    2: (-0.697,    0.177),     # moved IN to bearing 90 deg, R=0.82 (reachable for the relay)
+    3: ( 0.0736,  -0.3626),    # user-placed: bearing  20 deg, R=0.82
 }
 
-BELT_TOP_Z = 0.70            # belt top face, world z (== base z; base is at z=0)
+BELT_TOP_Z = 0.70            # belt top face, world z
+ROBOT_MOUNT_Z = 0.40         # UR5 base raised onto a pedestal (world z of base_link).
+                             # Targets are expressed in base_link, so a higher mount
+                             # LOWERS the belt's z in base frame -> brings the 0.70 m
+                             # belt into the floor-UR5's top-down reach envelope.
 CUBE_HALF = 0.02             # 40 mm cube
-INWARD = 0.15                # shift target toward base from belt centre (reach)
+INWARD = 0.27                # shift target toward base to the belt's NEAR edge:
+                             # conveyors now at R=0.82, so pick at 0.82-0.27=0.55 m
+                             # (within the ~0.60 m top-down reach to the 0.70 m belt)
 
 ATTACH_OFFSET = 0.0          # tool0 IS the grasp frame (no gripper below it)
 APPROACH_CLEAR = 0.15        # approach/retreat clearance above target
 
-CUBE_CENTER_Z = BELT_TOP_Z + CUBE_HALF          # cube resting on belt: 0.72
-GRASP_TOOL0_Z = CUBE_CENTER_Z + ATTACH_OFFSET   # tool0 z at the grasp: 0.72
+CUBE_CENTER_Z = BELT_TOP_Z + CUBE_HALF - ROBOT_MOUNT_Z   # belt-frame z, base_link: 0.32
+GRASP_TOOL0_Z = CUBE_CENTER_Z + ATTACH_OFFSET            # tool0 z at the grasp (base frame)
+CUBE_SPAWN_WORLD_Z = BELT_TOP_Z + CUBE_HALF              # cube sits on the belt in WORLD frame: 0.72
+                                                          # (gz spawns/reports in world frame, not base)
 
-# config -> (source conveyor id, sink conveyor id)
+# config -> conveyor PATH the box travels: pick at path[i], place at path[i+1].
+# config_2 = config_1 with one hop appended (append-only reconfiguration story).
 CONFIGS = {
-    1: (1, 3),
-    2: (3, 1),
+    1: [1, 2],       # one hop:  conv1 -> conv2          (conv3 unused)
+    2: [1, 2, 3],    # relay:    conv1 -> conv2 -> conv3
 }
 
 CUBE_NAME = "cube_1"
@@ -168,11 +177,11 @@ def spawn_cube(logger, sx, sy):
     # NOTE: spawn pose is in the WORLD frame (ros_gz_sim create), so convert the
     # base-frame grasp (sx,sy) back to world.
     wx, wy = sx + CELL_X, sy + CELL_Y
-    logger.info(f"Spawning {CUBE_NAME} at world ({wx:.3f},{wy:.3f},{CUBE_CENTER_Z}) from {sdf}")
+    logger.info(f"Spawning {CUBE_NAME} at world ({wx:.3f},{wy:.3f},{CUBE_SPAWN_WORLD_Z}) from {sdf}")
     subprocess.run(
         ["ros2", "run", "ros_gz_sim", "create",
          "-file", sdf, "-name", CUBE_NAME,
-         "-x", str(wx), "-y", str(wy), "-z", str(CUBE_CENTER_Z)],
+         "-x", str(wx), "-y", str(wy), "-z", str(CUBE_SPAWN_WORLD_Z)],
         check=True,
     )
     time.sleep(1.0)
@@ -277,18 +286,16 @@ UP_SEED = {
 }
 
 
-def run_diag(moveit, logger, src, dst):
-    """Sweep top-down wrist yaw to find a collision-free IK for the conveyor targets."""
+def run_diag(moveit, logger, path):
+    """Sweep top-down wrist yaw to find a collision-free IK for each conveyor on the path."""
     from moveit.core.robot_state import RobotState
 
     model = moveit.get_robot_model()
     psm = moveit.get_planning_scene_monitor()
-    sx, sy = belt_target(src)
-    dx, dy = belt_target(dst)
-    targets = {
-        f"PICK(c{src})":  (sx, sy, GRASP_TOOL0_Z),
-        f"PLACE(c{dst})": (dx, dy, GRASP_TOOL0_Z),
-    }
+    targets = {}
+    for cid in path:
+        cx, cy = belt_target(cid)
+        targets[f"conv{cid}"] = (cx, cy, GRASP_TOOL0_Z)
 
     for name, t in targets.items():
         logger.info(f"=== {name} base target ({t[0]:.3f},{t[1]:.3f},{t[2]:.3f}) ===")
@@ -316,6 +323,13 @@ def run_diag(moveit, logger, src, dst):
     return 0
 
 
+def _tokens():
+    """Flatten argv into individual tokens. The launch passes everything via a single
+    `args:=` string (one argv element), so 'in sys.argv' membership and pairwise parsing
+    both break for multi-token args like '--config 2 --ikvals' -> re-split on whitespace."""
+    return " ".join(sys.argv[1:]).split()
+
+
 def parse_config(argv):
     cfg = 1
     for i, a in enumerate(argv):
@@ -329,29 +343,25 @@ def parse_config(argv):
 
 
 def main():
-    spawn = "--no-spawn" not in sys.argv
-    cfg = parse_config(sys.argv)
-    src, dst = CONFIGS[cfg]
+    tokens = _tokens()
+    spawn = "--no-spawn" not in tokens
+    cfg = parse_config(tokens)
+    path = CONFIGS[cfg]                       # conveyor IDs the box travels through
 
     rclpy.init()
     logger = get_logger("warehouse_pick_place")
-    logger.info(f"config_{cfg}: pick conveyor_{src} -> place conveyor_{dst}")
+    logger.info(f"config_{cfg}: conveyor path " + " -> ".join(f"conv{c}" for c in path))
 
     moveit = MoveItPy(node_name="warehouse_pick_place")
     arm = moveit.get_planning_component("ur_manipulator")
     logger.info("MoveItPy up; ur_manipulator planning component ready.")
 
-    if "--diag" in sys.argv:
-        return run_diag(moveit, logger, src, dst)
+    if "--diag" in tokens:
+        return run_diag(moveit, logger, path)
 
     model = moveit.get_robot_model()
     psm = moveit.get_planning_scene_monitor()
     seed = [UP_SEED[j] for j in UP_SEED]
-
-    sx, sy = belt_target(src)
-    dx, dy = belt_target(dst)
-    logger.info(f"PICK base target  ({sx:.3f},{sy:.3f},{GRASP_TOOL0_Z:.3f})")
-    logger.info(f"PLACE base target ({dx:.3f},{dy:.3f},{GRASP_TOOL0_Z:.3f})")
 
     def ik(x, y, z, label, from_seed, nominal=None):
         st = solve_ik(model, psm, moveit, x, y, z, 0.0, from_seed, logger, label,
@@ -360,93 +370,102 @@ def main():
             return None, None
         return st, list(st.get_joint_group_positions("ur_manipulator"))
 
-    if "--ikvals" in sys.argv:
-        for lbl, t in (("pick.approach", (sx, sy, GRASP_TOOL0_Z + APPROACH_CLEAR)),
-                       ("pick.descend", (sx, sy, GRASP_TOOL0_Z)),
-                       ("place.approach", (dx, dy, GRASP_TOOL0_Z + APPROACH_CLEAR)),
-                       ("place.descend", (dx, dy, GRASP_TOOL0_Z))):
-            st, q = ik(t[0], t[1], t[2], lbl, seed)
-            if q is not None:
-                logger.info(f"IKVALS {lbl}: {[round(v,4) for v in q]}")
-            else:
-                logger.error(f"IKVALS {lbl}: UNREACHABLE")
+    if "--ikvals" in tokens:
+        for cid in path:
+            cx, cy = belt_target(cid)
+            for lbl, z in ((f"conv{cid}.approach", GRASP_TOOL0_Z + APPROACH_CLEAR),
+                           (f"conv{cid}.descend", GRASP_TOOL0_Z)):
+                st, q = ik(cx, cy, z, lbl, seed)
+                if q is not None:
+                    logger.info(f"IKVALS {lbl}: {[round(v,4) for v in q]}")
+                else:
+                    logger.error(f"IKVALS {lbl}: UNREACHABLE")
         return 0
 
-    try:
-        # clear start (named 'up' posture).
-        if not move_to_named(arm, moveit, logger, "up"):
-            return 1
+    def pick(conv_id, seed_in, do_spawn):
+        """Descend on conv_id's belt and grasp the cube (spawning it there on the first
+        hop), verifying the lift. Returns the retreat joint config (next seed) or None.
 
-        # Pre-solve the whole motion as collision-checked joint configs, chaining
-        # each IK seed off the previous so the arm moves through continuous,
-        # holdable configurations.
-        pa_st, pa_q = ik(sx, sy, GRASP_TOOL0_Z + APPROACH_CLEAR, "pick.approach", seed)
+        The DetachableJoint auto-attaches at an uncontrolled instant, so we DETACH to
+        clear it, let the cube settle, then explicitly ATTACH (one clean weld). gz-topic
+        attach is timing-racy -> verify by retreating and checking the cube lifted."""
+        sx, sy = belt_target(conv_id)
+        pa_st, pa_q = ik(sx, sy, GRASP_TOOL0_Z + APPROACH_CLEAR, f"pick{conv_id}.approach", seed_in)
         if pa_st is None:
-            return 1
-        pd_st, _ = ik(sx, sy, GRASP_TOOL0_Z, "pick.descend", pa_q, nominal=pa_q)
+            return None
+        pd_st, _ = ik(sx, sy, GRASP_TOOL0_Z, f"pick{conv_id}.descend", pa_q, nominal=pa_q)
         if pd_st is None:
-            return 1
-        sa_st, sa_q = ik(dx, dy, GRASP_TOOL0_Z + APPROACH_CLEAR, "place.approach", pa_q, nominal=pa_q)
-        if sa_st is None:
-            return 1
-        sd_st, _ = ik(dx, dy, GRASP_TOOL0_Z, "place.descend", sa_q, nominal=sa_q)
-        if sd_st is None:
-            return 1
-
-        # ── PICK at source conveyor ───────────────────────────────────────
-        if not move_to_state(arm, moveit, logger, pa_st, "pick.approach"):
-            return 1
-        if not move_to_state(arm, moveit, logger, pd_st, "pick.descend"):
-            return 1
-        # Cube appears on the source belt, right where the descended flange sits.
-        # The DetachableJoint auto-attaches on spawn at an uncontrolled instant; we
-        # DETACH first to clear it and let the cube settle, then explicitly ATTACH so
-        # exactly one weld is captured with the flange in place. Attach over gz topics
-        # is timing-racy, so VERIFY the grasp by retreating and checking the cube
-        # lifted, retrying the attach if it didn't.
-        if spawn:
+            return None
+        if not move_to_state(arm, moveit, logger, pa_st, f"pick{conv_id}.approach"):
+            return None
+        if not move_to_state(arm, moveit, logger, pd_st, f"pick{conv_id}.descend"):
+            return None
+        if do_spawn:
             spawn_cube(logger, sx, sy)
-        gz_pub(f"/{CUBE_NAME}/detach")   # clear the spawn-time auto-attach
+        gz_pub(f"/{CUBE_NAME}/detach")
         time.sleep(1.0)
-
-        lifted_z = BELT_TOP_Z + 0.10     # "lifted" threshold after retreat
-        grasped = False
+        lifted_z = BELT_TOP_Z + 0.10
         for attempt in range(1, 4):
-            logger.info(f"GRASP attempt {attempt}: attaching cube via DetachableJoint")
+            logger.info(f"GRASP attempt {attempt} at conv{conv_id}")
             gz_pub(f"/{CUBE_NAME}/attach")
             time.sleep(1.0)
-            if not move_to_state(arm, moveit, logger, pa_st, "pick.retreat"):
-                return 1
+            if not move_to_state(arm, moveit, logger, pa_st, f"pick{conv_id}.retreat"):
+                return None
             z = cube_z()
             logger.info(f"  cube z after retreat = {z} (lifted if > {lifted_z:.2f})")
             if z is not None and z > lifted_z:
-                grasped = True
-                logger.info("GRASP confirmed")
-                break
+                logger.info(f"GRASP confirmed at conv{conv_id}")
+                return pa_q
             if attempt < 3:
                 logger.warn("grasp not confirmed; re-descending to retry")
-                if not move_to_state(arm, moveit, logger, pd_st, "pick.descend"):
-                    return 1
-        if not grasped:
-            logger.error("GRASP FAILED after retries")
-            return 1
+                if not move_to_state(arm, moveit, logger, pd_st, f"pick{conv_id}.descend"):
+                    return None
+        logger.error(f"GRASP FAILED at conv{conv_id} after retries")
+        return None
 
-        # ── PLACE at sink conveyor ────────────────────────────────────────
-        if not move_to_state(arm, moveit, logger, sa_st, "place.approach"):
-            return 1
-        if not move_to_state(arm, moveit, logger, sd_st, "place.descend"):
-            return 1
-        logger.info("RELEASE: detaching cube")
+    def place(conv_id, seed_in):
+        """Carry to conv_id, descend, release, retreat. Returns retreat seed or None."""
+        dx, dy = belt_target(conv_id)
+        sa_st, sa_q = ik(dx, dy, GRASP_TOOL0_Z + APPROACH_CLEAR, f"place{conv_id}.approach",
+                         seed_in, nominal=seed_in)
+        if sa_st is None:
+            return None
+        sd_st, _ = ik(dx, dy, GRASP_TOOL0_Z, f"place{conv_id}.descend", sa_q, nominal=sa_q)
+        if sd_st is None:
+            return None
+        if not move_to_state(arm, moveit, logger, sa_st, f"place{conv_id}.approach"):
+            return None
+        if not move_to_state(arm, moveit, logger, sd_st, f"place{conv_id}.descend"):
+            return None
+        logger.info(f"RELEASE at conv{conv_id}: detaching cube")
         gz_pub(f"/{CUBE_NAME}/detach")
         time.sleep(1.0)
-        if not move_to_state(arm, moveit, logger, sa_st, "place.retreat"):
+        if not move_to_state(arm, moveit, logger, sa_st, f"place{conv_id}.retreat"):
+            return None
+        return sa_q
+
+    try:
+        if not move_to_named(arm, moveit, logger, "up"):
             return 1
+        # Walk the path: pick at path[i], place at path[i+1]. The SAME cube is carried
+        # the whole way (spawned only at the first station), so config_2 (1->2->3) just
+        # re-picks at conv2 where config_1's place left it.
+        seed_cur = seed
+        nhops = len(path) - 1
+        for i in range(nhops):
+            src_id, dst_id = path[i], path[i + 1]
+            logger.info(f"=== HOP {i+1}/{nhops}: conv{src_id} -> conv{dst_id} ===")
+            seed_cur = pick(src_id, seed_cur, do_spawn=(i == 0 and spawn))
+            if seed_cur is None:
+                return 1
+            seed_cur = place(dst_id, seed_cur)
+            if seed_cur is None:
+                return 1
 
         if not move_to_named(arm, moveit, logger, "up"):
             return 1
-
-        logger.info(f"WAREHOUSE config_{cfg} PICK->PLACE COMPLETE "
-                    f"(conveyor_{src} -> conveyor_{dst})")
+        logger.info(f"WAREHOUSE config_{cfg} COMPLETE (path " +
+                    " -> ".join(f"conv{c}" for c in path) + ")")
         return 0
     finally:
         moveit.shutdown()

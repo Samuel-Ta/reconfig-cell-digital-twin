@@ -51,6 +51,55 @@
     <origin xyz="0 0 0" rpy="0 0 0"/>
   </xacro:ur_robot>
 
+  <!-- ── RG2 gripper — COSMETIC visual-only ──────────────────────────────────────
+       The OnRobot RG2 mounted on the flange, so the arm visibly carries its gripper.
+       Fixed links, NEGLIGIBLE mass, and NO <collision>: the grasp is the
+       DetachableJoint (fingers never actuated), and omitting collision keeps the
+       ~0.2 m gripper from jamming into the belt during the flange-level grasp and
+       leaves the verified arm control/planning untouched. Mount + finger transforms
+       and meshes are taken verbatim from picknplace ur5_rg2/model.sdf. -->
+  <xacro:property name="rg2_mesh"
+    value="file://$(env HOME)/picknplace_ws/src/picknplace/urdf/ur5_rg2/meshes/visual/rg2"/>
+  <xacro:macro name="rg2_cosmetic_link" params="name mesh *visual_origin">
+    <link name="${name}">
+      <visual>
+        <xacro:insert_block name="visual_origin"/>
+        <geometry><mesh filename="${rg2_mesh}/${mesh}"/></geometry>
+      </visual>
+      <inertial>
+        <mass value="1e-4"/>
+        <inertia ixx="1e-6" iyy="1e-6" izz="1e-6" ixy="0" ixz="0" iyz="0"/>
+      </inertial>
+    </link>
+  </xacro:macro>
+
+  <joint name="rg2_hand_joint" type="fixed">
+    <parent link="wrist_3_link"/>
+    <child link="rg2_hand"/>
+    <origin xyz="0 0.0823 0" rpy="1.570796325 0 1.570796325"/>
+  </joint>
+  <xacro:rg2_cosmetic_link name="rg2_hand" mesh="hand.dae">
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </xacro:rg2_cosmetic_link>
+
+  <joint name="rg2_finger_joint1" type="fixed">
+    <parent link="rg2_hand"/>
+    <child link="rg2_leftfinger"/>
+    <origin xyz="0.105 0.017 0" rpy="0 0 0"/>
+  </joint>
+  <xacro:rg2_cosmetic_link name="rg2_leftfinger" mesh="finger.dae">
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </xacro:rg2_cosmetic_link>
+
+  <joint name="rg2_finger_joint2" type="fixed">
+    <parent link="rg2_hand"/>
+    <child link="rg2_rightfinger"/>
+    <origin xyz="0.105 -0.017 0" rpy="0 0 0"/>
+  </joint>
+  <xacro:rg2_cosmetic_link name="rg2_rightfinger" mesh="finger.dae">
+    <origin xyz="0 0 0" rpy="3.141592653589793 0 0"/>
+  </xacro:rg2_cosmetic_link>
+
   <!-- ros2_control on the 6 arm joints via the stock UR gz macro (position+velocity+effort
        command interfaces; gz_ros2_control needs them to actually drive the joints). The
        initial_positions spawn the arm already in the compact "up" pose so it never droops
