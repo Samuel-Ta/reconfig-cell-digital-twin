@@ -1,0 +1,22 @@
+<?xml version="1.0" ?>
+<!-- sink_2 bin fixture (spec §8 config_1, lane 2): box 0.24 x 0.24 x 0.12, base
+     on ground. Mirror of sink_1 across y=0. Spawn with explicit -x -y -z. The
+     placed cube lands on its top face (z=0.12). -->
+<sdf version="1.6">
+  <model name="sink_2">
+    <static>true</static>
+    <pose>0.25 -0.55 0.06 0 0 0</pose>
+    <link name="link">
+      <collision name="collision">
+        <geometry><box><size>0.24 0.24 0.12</size></box></geometry>
+      </collision>
+      <visual name="visual">
+        <geometry><box><size>0.24 0.24 0.12</size></box></geometry>
+        <material>
+          <ambient>0.7 0.4 0.2 1</ambient>
+          <diffuse>0.7 0.4 0.2 1</diffuse>
+        </material>
+      </visual>
+    </link>
+  </model>
+</sdf>

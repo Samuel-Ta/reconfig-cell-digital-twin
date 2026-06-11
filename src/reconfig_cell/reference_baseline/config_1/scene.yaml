@@ -1,0 +1,26 @@
+# FROZEN config_1 baseline — MoveIt planning-scene spec (spec §7 output #2).
+#
+# Flat list mapping 1:1 onto CollisionObjects: each station FIXTURE becomes a BOX
+# collision object so MoveIt plans around it. Parts (cubes) are NOT scene objects
+# (they are grasped, not avoided). Poses are box CENTERS in base_link (z = half
+# the fixture height, since the fixtures sit base-on-ground).
+#
+# RIGID baseline: these duplicate the geometry already in world.sdf by hand. A
+# config_2 reconfiguration must edit this file too (append source_3/sink_3),
+# keeping it in sync with world.sdf and task.yaml — the cross-file cost the
+# Phase-7 effort metric measures.
+
+frame_id: base_link
+collision_objects:
+  - id: source_1
+    primitive: {type: BOX, dimensions: [0.18, 0.18, 0.10]}
+    pose: {x: 0.45, y: 0.30, z: 0.05, qx: 0.0, qy: 0.0, qz: 0.0, qw: 1.0}
+  - id: sink_1
+    primitive: {type: BOX, dimensions: [0.24, 0.24, 0.12]}
+    pose: {x: 0.25, y: 0.55, z: 0.06, qx: 0.0, qy: 0.0, qz: 0.0, qw: 1.0}
+  - id: source_2
+    primitive: {type: BOX, dimensions: [0.18, 0.18, 0.10]}
+    pose: {x: 0.45, y: -0.30, z: 0.05, qx: 0.0, qy: 0.0, qz: 0.0, qw: 1.0}
+  - id: sink_2
+    primitive: {type: BOX, dimensions: [0.24, 0.24, 0.12]}
+    pose: {x: 0.25, y: -0.55, z: 0.06, qx: 0.0, qy: 0.0, qz: 0.0, qw: 1.0}
