@@ -137,6 +137,34 @@ def gz_pub(topic, times=3, gap=0.4):
         time.sleep(gap)
 
 
+# RG2 finger open/close (gz JointPositionController, topics /rg2/fingerN_cmd, gz.msgs.Double).
+# Sign (confirmed visually): POSITIVE spreads the fingers OPEN, NEGATIVE folds them IN.
+# Both controllers actuate symmetrically (~equal, opposite yaw), so we don't tune a precise
+# grip angle: we OPEN to clear the cube, then drive BOTH hard toward fully-closed and let
+# the cube itself arrest them. The box has collision, so the fingers fold until they press
+# its faces; the near finger nudges the box until the far one also contacts -> the box
+# SELF-CENTERS and both fingers clamp symmetrically, then the weld holds it for the carry.
+#   OPEN  = +0.65 -> fingers spread to descend around the 40 mm cube
+#   CLOSE = -1.10 -> firm fold; the cube (not the angle) is the mechanical limit
+FINGER_OPEN = 0.65
+FINGER_CLOSE = -1.10
+
+
+def set_fingers(cmd, settle=1.0):
+    """Drive both RG2 finger position controllers to `cmd` rad and let them settle.
+
+    Publish each command SEVERAL times (like gz_pub): a single gz-topic publish is
+    routinely missed depending on sim-step timing, which previously left ONE finger
+    on its old command -> only one finger folded. Repeating to BOTH topics makes the
+    open/close land on both fingers so they actuate symmetrically."""
+    for _ in range(4):
+        for t in ("/rg2/finger1_cmd", "/rg2/finger2_cmd"):
+            subprocess.run(["gz", "topic", "-t", t, "-m", "gz.msgs.Double", "-p", f"data: {cmd}"],
+                           check=False)
+        time.sleep(0.15)
+    time.sleep(settle)
+
+
 def cube_z():
     """Current cube z (m), or None."""
     import re
@@ -396,6 +424,7 @@ def main():
         pd_st, _ = ik(sx, sy, GRASP_TOOL0_Z, f"pick{conv_id}.descend", pa_q, nominal=pa_q)
         if pd_st is None:
             return None
+        set_fingers(FINGER_OPEN)                   # open before descending onto the cube
         if not move_to_state(arm, moveit, logger, pa_st, f"pick{conv_id}.approach"):
             return None
         if not move_to_state(arm, moveit, logger, pd_st, f"pick{conv_id}.descend"):
@@ -404,6 +433,7 @@ def main():
             spawn_cube(logger, sx, sy)
         gz_pub(f"/{CUBE_NAME}/detach")
         time.sleep(1.0)
+        set_fingers(FINGER_CLOSE)                   # close the fingers to pinch the cube
         lifted_z = BELT_TOP_Z + 0.10
         for attempt in range(1, 4):
             logger.info(f"GRASP attempt {attempt} at conv{conv_id}")
@@ -439,12 +469,14 @@ def main():
             return None
         logger.info(f"RELEASE at conv{conv_id}: detaching cube")
         gz_pub(f"/{CUBE_NAME}/detach")
+        set_fingers(FINGER_OPEN)                    # open the fingers to release
         time.sleep(1.0)
         if not move_to_state(arm, moveit, logger, sa_st, f"place{conv_id}.retreat"):
             return None
         return sa_q
 
     try:
+        set_fingers(FINGER_OPEN)                       # start with the gripper open
         if not move_to_named(arm, moveit, logger, "up"):
             return 1
         # Walk the path: pick at path[i], place at path[i+1]. The SAME cube is carried
