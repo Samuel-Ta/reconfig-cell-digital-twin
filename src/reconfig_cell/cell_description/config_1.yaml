@@ -1,0 +1,26 @@
+# config_1 — 2 lanes / 4 stations. The ONLY human-authored artifact for this cell
+# (spec §8, verbatim). The Gazebo world, MoveIt scene spec, and task-with-derived-
+# targets are GENERATED from this file by cell_generator (INVARIANT 4: single source
+# of truth). config_2 is this file with a third lane appended — nothing else differs
+# (INVARIANT 5: topology change is append-only).
+cell: {name: config_1, robot: ur_description, base_frame: base_link}
+stations:
+  - {id: source_1, type: source,
+     pose: {x: 0.45, y: 0.30, z: 0.0, roll: 0, pitch: 0, yaw: 0},
+     fixture: {geometry: {type: box, size: [0.18, 0.18, 0.10]}},
+     part: {geometry: {type: box, size: [0.04, 0.04, 0.04]}, grasp: {approach: top, offset_z: 0.02}}}
+  - {id: sink_1, type: sink,
+     pose: {x: 0.25, y: 0.55, z: 0.0, roll: 0, pitch: 0, yaw: 0},
+     fixture: {geometry: {type: box, size: [0.24, 0.24, 0.12]}}, part: null}
+  - {id: source_2, type: source,
+     pose: {x: 0.45, y: -0.30, z: 0.0, roll: 0, pitch: 0, yaw: 0},
+     fixture: {geometry: {type: box, size: [0.18, 0.18, 0.10]}},
+     part: {geometry: {type: box, size: [0.04, 0.04, 0.04]}, grasp: {approach: top, offset_z: 0.02}}}
+  - {id: sink_2, type: sink,
+     pose: {x: 0.25, y: -0.55, z: 0.0, roll: 0, pitch: 0, yaw: 0},
+     fixture: {geometry: {type: box, size: [0.24, 0.24, 0.12]}}, part: null}
+task:
+  - {op: pick,  from: source_1}
+  - {op: place, to: sink_1}
+  - {op: pick,  from: source_2}
+  - {op: place, to: sink_2}
