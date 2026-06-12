@@ -1,0 +1,19 @@
+# NEGATIVE-TEST artifact (spec §9). A deliberately-INVALID config: conveyor_9 is placed
+# far outside the UR5+RG2's top-down reach envelope. cell_scene_manager's IK reachability
+# guard MUST reject it at startup with EXACTLY:
+#     Configuration invalid: Station conveyor_9 out of physical reach
+# and the launch must NOT start cell_task_executor. This proves the guard is a real safety
+# gate, not a no-op. Run with:
+#     ros2 launch cell_bringup cell_warehouse.launch.py config:=config_invalid
+# (conveyor_1 is reachable and is checked first to show the guard passes good stations and
+# only rejects the unreachable one.)
+cell: {robot: ur5_rg2, base_frame: base_link}
+robot_mount: {x: -0.697, y: -0.643, z: 0.40}
+belt: {top_z: 0.70, inward: 0.27}
+part: {name: cube_1, geometry: {type: box, size: [0.04, 0.04, 0.04]}}
+stations:
+  - {id: conveyor_1, type: conveyor, pose: {x: -1.44596, y: -0.364014, yaw: -0.065274}}
+  - {id: conveyor_9, type: conveyor, pose: {x:  1.8,      y:  0.5,       yaw:  0.0}}
+task:
+  - {op: pick,  from: conveyor_1}
+  - {op: place, to:   conveyor_9}

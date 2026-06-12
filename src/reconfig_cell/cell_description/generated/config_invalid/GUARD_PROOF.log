@@ -1,0 +1,6 @@
+[INFO] [launch.user]: [cell_warehouse] config=config_invalid  uses conveyors [1, 9]  removing [2, 3]
+[scene_manager-10] [INFO] [1781292512.334734312] [cell_scene_manager]: [scene] applied 2 collision object(s) from scene.yaml
+[scene_manager-10] [INFO] [1781292512.343917666] [cell_scene_manager]: [guard] station conveyor_1: reachable
+[scene_manager-10] [ERROR] [1781292516.383266388] [cell_scene_manager]: Configuration invalid: Station conveyor_9 out of physical reach
+[ERROR] [scene_manager-10]: process has died [pid 6669, exit code 1, cmd '/home/samitade/reconfig_ws/install/cell_scene_manager/lib/cell_scene_manager/scene_manager /home/samitade/reconfig_ws/install/cell_description/share/cell_description/generated/config_invalid/scene.yaml /home/samitade/reconfig_ws/install/cell_description/share/cell_description/generated/config_invalid/task.yaml --ros-args -r __node:=cell_scene_manager --params-file /tmp/launch_params_pq8triht --params-file /tmp/launch_params_t4153jbc'].
+[INFO] [launch.user]: [cell_warehouse] IK guard FAILED (rc=1); aborting

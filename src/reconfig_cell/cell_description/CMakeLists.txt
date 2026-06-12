@@ -4,7 +4,7 @@ find_package(ament_cmake REQUIRED)
 
 # the ONLY human-authored cell artifacts (single source of truth) + the committed
 # generated/ output (build products, kept on disk for the effort-metric diff)
-install(FILES config_1.yaml config_2.yaml
+install(FILES config_1.yaml config_2.yaml config_invalid.yaml
   DESTINATION share/${PROJECT_NAME}
 )
 install(DIRECTORY generated
