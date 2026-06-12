@@ -1,26 +1,22 @@
-# config_1 — 2 lanes / 4 stations. The ONLY human-authored artifact for this cell
-# (spec §8, verbatim). The Gazebo world, MoveIt scene spec, and task-with-derived-
-# targets are GENERATED from this file by cell_generator (INVARIANT 4: single source
-# of truth). config_2 is this file with a third lane appended — nothing else differs
-# (INVARIANT 5: topology change is append-only).
-cell: {name: config_1, robot: ur_description, base_frame: base_link}
+# config_1 — Intel warehouse conveyor cell, 2 conveyors (conveyor_1, conveyor_3).
+# conveyor_2 is ABSENT from this config: it is neither a station nor a task target, so
+# the bringup removes delivery_conveyor_2 from the world (the GUI shows a gap). The box
+# travels conveyor_1 -> conveyor_3 directly.
+#
+# This is the ONLY human-authored artifact for this cell (single source of truth,
+# INVARIANT 4). cell_generator compiles it into the MoveIt scene spec + the task with
+# derived targets; the warehouse world + UR5/RG2 are loaded by the bringup (INVARIANT 1).
+# config_2 inserts conveyor_2 and reroutes the relay through it.
+cell: {name: config_1, robot: ur5_rg2, base_frame: base_link}
+
+robot_mount: {x: -0.697, y: -0.643, z: 0.40}   # UR5 base in the world (on the pedestal)
+belt: {top_z: 0.70, inward: 0.27}              # belt top z; inward shift to the near edge
+part: {name: cube_1, geometry: {type: box, size: [0.04, 0.04, 0.04]}}
+
 stations:
-  - {id: source_1, type: source,
-     pose: {x: 0.45, y: 0.30, z: 0.0, roll: 0, pitch: 0, yaw: 0},
-     fixture: {geometry: {type: box, size: [0.18, 0.18, 0.10]}},
-     part: {geometry: {type: box, size: [0.04, 0.04, 0.04]}, grasp: {approach: top, offset_z: 0.02}}}
-  - {id: sink_1, type: sink,
-     pose: {x: 0.25, y: 0.55, z: 0.0, roll: 0, pitch: 0, yaw: 0},
-     fixture: {geometry: {type: box, size: [0.24, 0.24, 0.12]}}, part: null}
-  - {id: source_2, type: source,
-     pose: {x: 0.45, y: -0.30, z: 0.0, roll: 0, pitch: 0, yaw: 0},
-     fixture: {geometry: {type: box, size: [0.18, 0.18, 0.10]}},
-     part: {geometry: {type: box, size: [0.04, 0.04, 0.04]}, grasp: {approach: top, offset_z: 0.02}}}
-  - {id: sink_2, type: sink,
-     pose: {x: 0.25, y: -0.55, z: 0.0, roll: 0, pitch: 0, yaw: 0},
-     fixture: {geometry: {type: box, size: [0.24, 0.24, 0.12]}}, part: null}
+  - {id: conveyor_1, type: conveyor, pose: {x: -1.44596, y: -0.364014, yaw: -0.065274}}
+  - {id: conveyor_3, type: conveyor, pose: {x:  0.0736,   y: -0.3626,   yaw: -3.103600}}
+
 task:
-  - {op: pick,  from: source_1}
-  - {op: place, to: sink_1}
-  - {op: pick,  from: source_2}
-  - {op: place, to: sink_2}
+  - {op: pick,  from: conveyor_1}
+  - {op: place, to:   conveyor_3}

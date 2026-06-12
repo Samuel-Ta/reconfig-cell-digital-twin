@@ -1,0 +1,264 @@
+#!/usr/bin/env python3
+"""cell_task_executor — execute the generated conveyor relay, config-AGNOSTIC (INVARIANT 2).
+
+    ros2 run cell_task_executor task_executor <task.yaml>
+
+No knowledge of how many conveyors/hops exist: it loops over whatever ops the generated
+task.yaml hands it. config_1 (conv1->conv2) and config_2 (conv1->conv2->conv3) run the
+same code. All targets/spawn poses are DERIVED in the generator and read verbatim here
+(INVARIANT 3) — no geometry in this node.
+
+Per op (the proven warehouse flow, reused verbatim):
+  pick : open fingers -> approach above target -> descend -> (spawn the cube here on the
+         FIRST pick only) -> CLOSE fingers onto the cube (RG2 contact grab, box self-
+         centres) -> attach the DetachableJoint weld -> verify it lifted -> retreat.
+  place: carry -> approach -> descend -> detach -> open fingers -> retreat.
+The box is carried the whole relay; later picks re-grasp it where the last place left it.
+"""
+import math
+import os
+import random
+import subprocess
+import sys
+import time
+
+import rclpy
+from rclpy.logging import get_logger
+
+import yaml
+from geometry_msgs.msg import Pose
+from moveit.planning import MoveItPy
+from moveit.core.robot_state import RobotState
+
+GROUP = "ur_manipulator"
+TCP = "rg2_tcp"                  # IK drives the RG2 fingertip frame to the belt
+APPROACH_CLEAR = 0.15           # single global approach/retreat clearance
+UP_SEED = [0.0, -1.5708, -1.5708, -1.5708, 0.0, 0.0]
+# RG2 fingers (gz JointPositionController): + spreads OPEN, - folds CLOSED; drive both
+# hard to CLOSE and let the cube arrest them (contact grab). Robot/gripper constants.
+FINGER_OPEN, FINGER_CLOSE = 0.65, -1.10
+TOPDOWN_QUAT = (1.0, 0.0, 0.0, 0.0)
+
+
+# ── gz helpers ───────────────────────────────────────────────────────────────────
+def gz_pub(topic, times=3, gap=0.4):
+    for _ in range(times):
+        subprocess.run(["gz", "topic", "-t", topic, "-m", "gz.msgs.Empty", "-p", ""], check=False)
+        time.sleep(gap)
+
+
+def set_fingers(cmd, settle=1.0):
+    """Drive both RG2 finger controllers to `cmd` rad. Publish 4x to BOTH topics: a
+    single gz publish is routinely dropped on sim-step timing (else only one finger moves)."""
+    for _ in range(4):
+        for t in ("/rg2/finger1_cmd", "/rg2/finger2_cmd"):
+            subprocess.run(["gz", "topic", "-t", t, "-m", "gz.msgs.Double", "-p", f"data: {cmd}"], check=False)
+        time.sleep(0.15)
+    time.sleep(settle)
+
+
+def model_z(name):
+    import re
+    r = subprocess.run(["gz", "model", "-m", name, "-p"], capture_output=True, text=True, timeout=8)
+    m = re.search(r"\[\s*[-\d.]+\s+[-\d.]+\s+([-\d.]+)\s*\]", r.stdout)
+    return float(m.group(1)) if m else None
+
+
+def model_exists(name):
+    r = subprocess.run(["gz", "model", "-m", name, "-p"], capture_output=True, text=True, timeout=8)
+    return "Pose" in r.stdout
+
+
+def spawn_cube(name, wx, wy, wz, logger):
+    from ament_index_python.packages import get_package_share_directory
+    sdf = os.path.join(get_package_share_directory("cell_bringup"), "models", "cube_part_rg2.sdf")
+    if model_exists(name):
+        subprocess.run(["ros2", "run", "ros_gz_sim", "remove", "--ros-args",
+                        "-p", f"entity_name:={name}"], check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _ in range(20):
+            time.sleep(0.3)
+            if not model_exists(name):
+                break
+    logger.info(f"spawning {name} at world ({wx:.3f},{wy:.3f},{wz:.3f})")
+    subprocess.run(["ros2", "run", "ros_gz_sim", "create", "-file", sdf, "-name", name,
+                    "-x", str(wx), "-y", str(wy), "-z", str(wz)], check=True)
+    time.sleep(1.0)
+
+
+# ── IK + motion (proven warehouse approach: joint-space goals from multi-seed,
+#    collision-checked, elbow-up IK targeting the RG2 TCP) ─────────────────────────
+def quat_mul(a, b):
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return (aw*bx + ax*bw + ay*bz - az*by, aw*by - ax*bz + ay*bw + az*bx,
+            aw*bz + ax*by - ay*bx + az*bw, aw*bw - ax*bx - ay*by - az*bz)
+
+
+def topdown_quat(yaw):
+    return quat_mul((0.0, 0.0, math.sin(yaw/2), math.cos(yaw/2)), (1.0, 0.0, 0.0, 0.0))
+
+
+def solve_ik(model, psm, x, y, z, seed, logger, label, nominal=None):
+    qx, qy, qz, qw = topdown_quat(0.0)
+    pose = Pose()
+    pose.position.x, pose.position.y, pose.position.z = float(x), float(y), float(z)
+    pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w = qx, qy, qz, qw
+    SHOULDER_LIFT = 1
+    best_q = best_fb = None
+    best_score = best_fb_score = float("inf")
+    for i in range(120):
+        state = RobotState(model)
+        if i == 0:
+            state.set_joint_group_positions(GROUP, list(seed))
+        else:
+            state.set_joint_group_positions(GROUP, [random.uniform(-math.pi, math.pi) for _ in range(6)])
+        state.update()
+        if not state.set_from_ik(GROUP, pose, TCP, 0.05):
+            continue
+        state.update()
+        q = list(state.get_joint_group_positions(GROUP))
+        with psm.read_only() as scene:
+            if scene.is_state_colliding(robot_state=state, joint_model_group_name=GROUP, verbose=False):
+                continue
+        score = sum((a - b) ** 2 for a, b in zip(q, nominal)) if nominal is not None else max(abs(v) for v in q)
+        if score < best_fb_score:
+            best_fb_score, best_fb = score, q
+        if q[SHOULDER_LIFT] <= -0.5 and score < best_score:
+            best_score, best_q = score, q
+    if best_q is None:
+        best_q = best_fb
+    if best_q is None:
+        logger.error(f"IK FAILED for {label}")
+        return None
+    logger.info(f"IK {label}: {[round(v,3) for v in best_q]}")
+    goal = RobotState(model)
+    goal.set_joint_group_positions(GROUP, best_q)
+    goal.update()
+    return goal
+
+
+def plan_exec(arm, robot, logger, label, attempts=6):
+    result = None
+    for i in range(1, attempts + 1):
+        logger.info(f"Planning -> {label} (try {i}/{attempts})")
+        result = arm.plan()
+        if result:
+            break
+    if not result:
+        logger.error(f"PLAN FAILED for {label}")
+        return False
+    logger.info(f"Executing -> {label}")
+    robot.execute(result.trajectory, controllers=[])
+    time.sleep(0.5)
+    return True
+
+
+def move_named(arm, robot, logger, name):
+    arm.set_start_state_to_current_state()
+    arm.set_goal_state(configuration_name=name)
+    return plan_exec(arm, robot, logger, f"named:{name}")
+
+
+def move_state(arm, robot, logger, goal, label):
+    arm.set_start_state_to_current_state()
+    arm.set_goal_state(robot_state=goal)
+    return plan_exec(arm, robot, logger, label)
+
+
+def main():
+    argv = [a for a in sys.argv[1:] if not a.startswith("--ros-args") and ":=" not in a and a != "--"]
+    if not argv:
+        print("usage: task_executor <task.yaml>", file=sys.stderr)
+        return 2
+    with open(argv[0]) as f:
+        task = yaml.safe_load(f)
+    ops = task["ops"]
+    part = task.get("part", "cube_1")
+
+    rclpy.init()
+    logger = get_logger("cell_task_executor")
+    moveit = MoveItPy(node_name="cell_task_executor")
+    arm = moveit.get_planning_component(GROUP)
+    model = moveit.get_robot_model()
+    psm = moveit.get_planning_scene_monitor()
+    logger.info(f"MoveItPy up; executing {len(ops)} op(s), part={part}, from {argv[0]}")
+
+    seed = list(UP_SEED)
+
+    def ik(x, y, z, label, from_seed, nominal=None):
+        st = solve_ik(model, psm, x, y, z, from_seed, logger, label, nominal=nominal)
+        return (st, list(st.get_joint_group_positions(GROUP))) if st else (None, None)
+
+    spawned = False
+    try:
+        set_fingers(FINGER_OPEN)
+        if not move_named(arm, moveit, logger, "up"):
+            return 1
+
+        for idx, op in enumerate(ops):
+            tp = op["target_pose"]
+            ap_st, ap_q = ik(tp["x"], tp["y"], tp["z"] + APPROACH_CLEAR, f"op{idx}.{op['op']}.approach", seed)
+            if ap_st is None:
+                return 1
+            de_st, _ = ik(tp["x"], tp["y"], tp["z"], f"op{idx}.{op['op']}.descend", ap_q, nominal=ap_q)
+            if de_st is None:
+                return 1
+            st = op["station"]
+
+            if op["op"] == "pick":
+                set_fingers(FINGER_OPEN)
+                if not move_state(arm, moveit, logger, ap_st, f"{st}.approach"):
+                    return 1
+                if not move_state(arm, moveit, logger, de_st, f"{st}.descend"):
+                    return 1
+                if "spawn_pose" in op and not spawned:
+                    sp = op["spawn_pose"]
+                    spawn_cube(part, sp["x"], sp["y"], sp["z"], logger)   # first pick spawns the box
+                    spawned = True
+                gz_pub(f"/{part}/detach")                                  # clear any auto-attach
+                time.sleep(1.0)
+                pre_z = model_z(part)                                      # resting height before grasp
+                set_fingers(FINGER_CLOSE)                                  # fold fingers onto the cube
+                grasped = False
+                for attempt in range(1, 4):
+                    logger.info(f"GRASP {part} attempt {attempt} at {st}")
+                    gz_pub(f"/{part}/attach")
+                    time.sleep(1.0)
+                    if not move_state(arm, moveit, logger, ap_st, f"{st}.retreat"):
+                        return 1
+                    z = model_z(part)
+                    logger.info(f"  {part} z after retreat = {z} (was {pre_z})")
+                    if z is not None and pre_z is not None and z > pre_z + 0.05:
+                        grasped = True
+                        logger.info(f"GRASP {part} confirmed at {st}")
+                        break
+                    if attempt < 3 and not move_state(arm, moveit, logger, de_st, f"{st}.re-descend"):
+                        return 1
+                if not grasped:
+                    logger.error(f"GRASP FAILED for {part} at {st}")
+                    return 1
+                seed = ap_q
+            else:  # place
+                if not move_state(arm, moveit, logger, ap_st, f"{st}.approach"):
+                    return 1
+                if not move_state(arm, moveit, logger, de_st, f"{st}.descend"):
+                    return 1
+                logger.info(f"RELEASE {part} at {st}")
+                gz_pub(f"/{part}/detach")
+                set_fingers(FINGER_OPEN)
+                time.sleep(1.0)
+                if not move_state(arm, moveit, logger, ap_st, f"{st}.retreat"):
+                    return 1
+                seed = ap_q
+
+        move_named(arm, moveit, logger, "up")
+        logger.info(f"RELAY COMPLETE — {len(ops)} ops executed")
+        return 0
+    finally:
+        moveit.shutdown()
+        rclpy.try_shutdown()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

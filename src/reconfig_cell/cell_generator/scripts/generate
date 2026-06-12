@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
-"""cell_generator — compile ONE declarative cell YAML into the three build artifacts.
+"""cell_generator — compile ONE declarative conveyor-cell YAML into the build artifacts.
 
     ros2 run cell_generator generate --config <config_N.yaml> [--out <dir>]
 
-This is the contribution side of the paper (spec §7/§10): the single human-authored
-YAML (cell_description/config_N.yaml) is the ONLY source of truth; world.sdf, the
-MoveIt scene spec, and the task-with-derived-targets are GENERATED build products.
-Reconfiguring (config_1 -> config_2) is a single append to the YAML + re-run of this
-tool — no edits to the generated files, no code changes (INVARIANTS 4 & 5).
+Contribution side of the paper (spec §7/§10): the single authored YAML
+(cell_description/config_N.yaml) is the ONLY source of truth. The MoveIt scene spec
+and the task-with-derived-targets are GENERATED build products. The constant Intel
+warehouse world (cell_arranged.world) and the UR5+RG2 robot are loaded by the bringup,
+never generated (INVARIANT 1). Reconfiguring config_1 -> config_2 is a single append to
+the YAML + a regenerate — no edits to generated files, no code (INVARIANTS 4 & 5).
 
-The generator loops over `stations` ONCE and emits, for cell <name>, into
-<out>/<name>/:
-  world.sdf   (§7 #1) one static <model> per fixture + one dynamic part per source
-  scene.yaml  (§7 #2) flat list -> MoveIt CollisionObjects (fixtures only, as BOX)
-  task.yaml   (§7 #3) abstract ops resolved to DERIVED top-down target poses
+Cell: a UR5+RG2 on a pedestal, surrounded by delivery conveyors. The generator loops
+over `stations` (conveyors) once and emits, into <out>/<name>/:
+  scene.yaml  (§7 #2) one BOX CollisionObject per conveyor (belt slab) in base_link
+  task.yaml   (§7 #3) the relay ops resolved to DERIVED top-down grasp targets
 
-Generating config_1 reproduces the frozen reference_baseline (pick z=0.20, place
-z=0.22), so the framework output is scope-matched to the rigid baseline.
+DERIVATION (all geometry lives here, never in a node — INVARIANT 3):
+  base(x,y)   = conveyor_world(x,y) - robot_mount(x,y)         # robot at yaw 0
+  belt_target = base shifted INWARD toward the base by `inward` (reach the near edge)
+  target z    = belt.top_z + part_half - robot_mount.z         # base_link frame
+  spawn_pose  = belt_target back in WORLD + belt.top_z+part_half (cube rests on belt)
+  orientation = top-down (tool0/TCP +z -> world -z), quat (1,0,0,0)
 """
 import argparse
 import math
@@ -25,45 +29,22 @@ import sys
 
 import yaml
 
-# ── constants of the CONSTANT robot/gripper (not per-config; live here, never in a
-#    node — INVARIANT 3) ─────────────────────────────────────────────────────────
-# tool0 -> gripper attach-frame distance for the minimal parallel-jaw gripper
-# (cell_gripper_description). The derived tool0 target sits this far above the grasp
-# point. Value matches the reference_baseline hand-derivation (…+ gripper_attach 0.08).
-GRIPPER_ATTACH_Z = 0.08
-# top-down grasp: tool0 +z -> world -z, quaternion (qx,qy,qz,qw) = (1,0,0,0)
-TOPDOWN_QUAT = (1.0, 0.0, 0.0, 0.0)
-# the box-fixture robot model the DetachableJoint binds the part to (INVARIANT 1:
-# the part carries the grasp plugin; the robot description is untouched)
-CHILD_MODEL = "ur5_with_gripper"
-
-SOURCE_RGBA = "0.2 0.4 0.7 1"   # blue feeders
-SINK_RGBA = "0.7 0.4 0.2 1"     # orange bins
-PART_RGBA = "0.1 0.7 0.2 1"     # green cubes
+TOPDOWN_QUAT = (1.0, 0.0, 0.0, 0.0)   # (qx,qy,qz,qw): tool frame +z -> world -z
+CONVEYOR_RGBA = "0.5 0.5 0.55 1"
+# belt-slab collision box footprint (length, width); height is the slab thickness
+BELT_BOX_LEN, BELT_BOX_WID, BELT_BOX_THK = 1.0, 0.5, 0.10
 
 
 def fmt(v):
-    """Clean numeric formatting: drop float noise (0.12000000000000001 -> 0.12)."""
-    if isinstance(v, float):
-        return f"{v:.9g}"
-    return str(v)
+    return f"{v:.9g}" if isinstance(v, float) else str(v)
 
 
 def rpy_to_quat(roll, pitch, yaw):
     cr, sr = math.cos(roll / 2), math.sin(roll / 2)
     cp, sp = math.cos(pitch / 2), math.sin(pitch / 2)
     cy, sy = math.cos(yaw / 2), math.sin(yaw / 2)
-    return (
-        sr * cp * cy - cr * sp * sy,   # qx
-        cr * sp * cy + sr * cp * sy,   # qy
-        cr * cp * sy - sr * sp * cy,   # qz
-        cr * cp * cy + sr * sp * sy,   # qw
-    )
-
-
-def part_name(source_id):
-    """source_1 -> cube_1 (deterministic, matches reference_baseline naming)."""
-    return "cube_" + source_id.split("_")[-1]
+    return (sr * cp * cy - cr * sp * sy, cr * sp * cy + sr * cp * sy,
+            cr * cp * sy - sr * sp * cy, cr * cp * cy + sr * sp * sy)
 
 
 # ── validation (refuse to build on violation — spec §7) ─────────────────────────
@@ -73,151 +54,120 @@ def validate(cell):
     if len(ids) != len(set(ids)):
         sys.exit("INVALID: station ids are not unique")
     by_id = {s["id"]: s for s in stations}
-    for s in stations:
-        if s["type"] == "source" and s.get("part") is None:
-            sys.exit(f"INVALID: source '{s['id']}' has no part")
-        if s["type"] == "sink" and s.get("part") is not None:
-            sys.exit(f"INVALID: sink '{s['id']}' must have part: null")
     for op in cell["task"]:
         ref = op.get("from") or op.get("to")
         if ref not in by_id:
             sys.exit(f"INVALID: task op references unknown station '{ref}'")
-        if op["op"] == "pick" and by_id[ref]["type"] != "source":
-            sys.exit(f"INVALID: pick must target a source, got '{ref}'")
-        if op["op"] == "place" and by_id[ref]["type"] != "sink":
-            sys.exit(f"INVALID: place must target a sink, got '{ref}'")
+    if not cell["task"] or cell["task"][0]["op"] != "pick":
+        sys.exit("INVALID: task must start with a pick (the part is spawned there)")
     return by_id
 
 
-# ── derivation (spec §7 derived-target rule; the rigid baseline hardcodes these) ─
-def fixture_top(station):
-    """World z of the fixture top face (box sits base-on-ground at station.z)."""
-    return station["pose"]["z"] + station["fixture"]["geometry"]["size"][2]
+# ── derivation ──────────────────────────────────────────────────────────────────
+def base_xy(cell, station):
+    """conveyor world (x,y) -> robot base_link (x,y) (robot mounted at yaw 0)."""
+    m = cell["robot_mount"]
+    return station["pose"]["x"] - m["x"], station["pose"]["y"] - m["y"]
 
 
-def pick_target_z(station):
-    # tool0 = fixture_top + grasp.offset_z (grasp point above the fixture top)
-    #         + gripper_attach (tool0 above the grasp point)
-    return fixture_top(station) + station["part"]["grasp"]["offset_z"] + GRIPPER_ATTACH_Z
+def belt_target(cell, station):
+    """base (x,y) shifted INWARD toward the base origin to the belt's near edge."""
+    bx, by = base_xy(cell, station)
+    r = math.hypot(bx, by)
+    if r < 1e-6:
+        return bx, by
+    inward = cell["belt"]["inward"]
+    return bx - inward * bx / r, by - inward * by / r
 
 
-def place_target_z(sink, held_part):
-    # the carried part rests on the sink top; tool0 sits a part-half + attach above it
-    part_half = held_part["geometry"]["size"][2] / 2.0
-    return fixture_top(sink) + part_half + GRIPPER_ATTACH_Z
+def part_half(cell):
+    return cell["part"]["geometry"]["size"][2] / 2.0
+
+
+def grasp_z(cell):
+    """tool/TCP target z in base_link: belt top + part half, lowered by the mount height."""
+    return cell["belt"]["top_z"] + part_half(cell) - cell["robot_mount"]["z"]
+
+
+def spawn_world(cell, station):
+    """WORLD pose where the cube rests on this conveyor's belt (for the first pick)."""
+    m = cell["robot_mount"]
+    sx, sy = belt_target(cell, station)
+    return sx + m["x"], sy + m["y"], cell["belt"]["top_z"] + part_half(cell)
 
 
 # ── emitters ────────────────────────────────────────────────────────────────────
-def emit_world(cell):
-    L = ['<?xml version="1.0" ?>',
-         f'<!-- GENERATED by cell_generator from {cell["name"]}.yaml — DO NOT EDIT.',
-         '     Config-specific station fixtures + source parts only. The UR5+gripper',
-         '     (INVARIANT 1) and the decorative backdrop are NOT here; the bringup',
-         '     spawns/loads them separately. Parts carry the DetachableJoint grasp.',
-         '     Reconfigure by editing the YAML and regenerating, never this file. -->',
-         '<sdf version="1.6">',
-         f'  <world name="{cell["name"]}">']
-    for s in cell["stations"]:
-        p = s["pose"]
-        sx, sy, sz = s["fixture"]["geometry"]["size"]
-        cz = p["z"] + sz / 2.0                       # box center (base-on-ground)
-        rgba = SOURCE_RGBA if s["type"] == "source" else SINK_RGBA
-        L += [f'    <model name="{s["id"]}">',
-              '      <static>true</static>',
-              f'      <pose>{fmt(p["x"])} {fmt(p["y"])} {fmt(cz)} {fmt(p["roll"])} {fmt(p["pitch"])} {fmt(p["yaw"])}</pose>',
-              '      <link name="link">',
-              f'        <collision name="collision"><geometry><box><size>{fmt(sx)} {fmt(sy)} {fmt(sz)}</size></box></geometry></collision>',
-              f'        <visual name="visual"><geometry><box><size>{fmt(sx)} {fmt(sy)} {fmt(sz)}</size></box></geometry>',
-              f'          <material><ambient>{rgba}</ambient><diffuse>{rgba}</diffuse></material></visual>',
-              '      </link>',
-              '    </model>']
-    for s in cell["stations"]:
-        if s["type"] != "source":
-            continue
-        p = s["pose"]
-        px, py, pz = s["part"]["geometry"]["size"]
-        cz = fixture_top(s) + pz / 2.0               # part rests on the fixture top
-        name = part_name(s["id"])
-        L += [f'    <model name="{name}">',
-              f'      <pose>{fmt(p["x"])} {fmt(p["y"])} {fmt(cz)} 0 0 0</pose>',
-              '      <link name="link">',
-              '        <inertial><mass>0.05</mass>',
-              '          <inertia><ixx>1.33e-5</ixx><iyy>1.33e-5</iyy><izz>1.33e-5</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>',
-              f'        <collision name="collision"><geometry><box><size>{fmt(px)} {fmt(py)} {fmt(pz)}</size></box></geometry>',
-              '          <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface></collision>',
-              f'        <visual name="visual"><geometry><box><size>{fmt(px)} {fmt(py)} {fmt(pz)}</size></box></geometry>',
-              f'          <material><ambient>{PART_RGBA}</ambient><diffuse>{PART_RGBA}</diffuse></material></visual>',
-              '      </link>',
-              f'      <plugin filename="gz-sim-detachable-joint-system" name="gz::sim::systems::DetachableJoint">',
-              '        <parent_link>link</parent_link>',
-              f'        <child_model>{CHILD_MODEL}</child_model>',
-              '        <child_link>wrist_3_link</child_link>',
-              f'        <attach_topic>/{name}/attach</attach_topic>',
-              f'        <detach_topic>/{name}/detach</detach_topic>',
-              f'        <output_topic>/{name}/state</output_topic>',
-              '        <suppress_child_warning>true</suppress_child_warning>',
-              '      </plugin>',
-              '    </model>']
-    L += ['  </world>', '</sdf>', '']
-    return "\n".join(L)
-
-
-def emit_scene(cell):
+def emit_scene(cell, by_id):
     L = [f'# GENERATED by cell_generator from {cell["name"]}.yaml — DO NOT EDIT.',
-         '# MoveIt planning-scene spec (§7 #2): each fixture -> one BOX CollisionObject',
-         '# (pose = box CENTER in base_link). Parts are grasped, not avoided -> excluded.',
+         '# MoveIt planning-scene spec (§7 #2): each conveyor -> one BOX CollisionObject',
+         '# (a belt slab at the belt top, in base_link). Used by cell_scene_manager.',
          f'frame_id: {cell["base_frame"]}',
          'collision_objects:']
-    for s in cell["stations"]:
-        p = s["pose"]
-        sx, sy, sz = s["fixture"]["geometry"]["size"]
-        cz = p["z"] + sz / 2.0
-        qx, qy, qz, qw = rpy_to_quat(p["roll"], p["pitch"], p["yaw"])
-        L += [f'  - id: {s["id"]}',
-              f'    primitive: {{type: BOX, dimensions: [{sx}, {sy}, {sz}]}}',
-              f'    pose: {{x: {p["x"]}, y: {p["y"]}, z: {cz}, '
+    mz = cell["robot_mount"]["z"]
+    # one slab per conveyor that the task actually uses (config-agnostic: the set comes
+    # from the task ops, so config_1 omits the unused conveyor_3)
+    used = []
+    for op in cell["task"]:
+        sid = op.get("from") or op.get("to")
+        if sid not in used:
+            used.append(sid)
+    for sid in used:
+        s = by_id[sid]
+        bx, by = base_xy(cell, s)
+        cz = cell["belt"]["top_z"] - BELT_BOX_THK / 2.0 - mz      # slab top at belt top
+        qx, qy, qz, qw = rpy_to_quat(0, 0, s["pose"]["yaw"])
+        L += [f'  - id: {sid}',
+              f'    primitive: {{type: BOX, dimensions: [{BELT_BOX_LEN}, {BELT_BOX_WID}, {BELT_BOX_THK}]}}',
+              f'    pose: {{x: {fmt(bx)}, y: {fmt(by)}, z: {fmt(cz)}, '
               f'qx: {qx:.6g}, qy: {qy:.6g}, qz: {qz:.6g}, qw: {qw:.6g}}}']
     return "\n".join(L) + "\n"
 
 
 def emit_task(cell, by_id):
     qx, qy, qz, qw = TOPDOWN_QUAT
+    z = grasp_z(cell)
+    part = cell["part"]["name"]
     L = [f'# GENERATED by cell_generator from {cell["name"]}.yaml — DO NOT EDIT.',
-         '# Task ops resolved to DERIVED top-down targets (§7 #3). The rigid baseline',
-         '# hardcodes equivalents of these literals; here they are computed from module',
-         '# data (station pose o fixture/part top-face o grasp/gripper offset).',
+         '# Relay task resolved to DERIVED top-down grasp targets (§7 #3), base_link frame.',
+         '# The box is carried the whole way: spawn_pose (WORLD) appears on the FIRST pick',
+         '# only; later picks re-grasp the carried cube. No pose literals in the executor.',
          f'frame_id: {cell["base_frame"]}',
+         f'part: {part}',
          'ops:']
-    held = None
+    first_pick_done = False
     for op in cell["task"]:
         if op["op"] == "pick":
             s = by_id[op["from"]]
-            z = pick_target_z(s)
-            held = s["part"]
-            name = part_name(s["id"])
-            L += [f'  - {{op: pick,  station: {s["id"]}, part: {name},',
-                  f'     target_pose: {{x: {s["pose"]["x"]}, y: {s["pose"]["y"]}, z: {z:.6g}, '
-                  f'qx: {qx}, qy: {qy}, qz: {qz}, qw: {qw}}}}}']
+            bx, by = belt_target(cell, s)
+            line = (f'  - {{op: pick,  station: {s["id"]}, '
+                    f'target_pose: {{x: {fmt(bx)}, y: {fmt(by)}, z: {fmt(z)}, '
+                    f'qx: {qx}, qy: {qy}, qz: {qz}, qw: {qw}}}')
+            if not first_pick_done:
+                wx, wy, wz = spawn_world(cell, s)
+                line += (f',\n     spawn_pose: {{x: {fmt(wx)}, y: {fmt(wy)}, z: {fmt(wz)}}}}}')
+                first_pick_done = True
+            else:
+                line += '}'
+            L.append(line)
         else:  # place
             s = by_id[op["to"]]
-            z = place_target_z(s, held)
-            L += [f'  - {{op: place, station: {s["id"]},',
-                  f'     target_pose: {{x: {s["pose"]["x"]}, y: {s["pose"]["y"]}, z: {z:.6g}, '
-                  f'qx: {qx}, qy: {qy}, qz: {qz}, qw: {qw}}}}}']
+            bx, by = belt_target(cell, s)
+            L.append(f'  - {{op: place, station: {s["id"]}, '
+                     f'target_pose: {{x: {fmt(bx)}, y: {fmt(by)}, z: {fmt(z)}, '
+                     f'qx: {qx}, qy: {qy}, qz: {qz}, qw: {qw}}}}}')
     return "\n".join(L) + "\n"
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Compile a cell YAML into world/scene/task.")
+    ap = argparse.ArgumentParser(description="Compile a conveyor-cell YAML into scene/task.")
     ap.add_argument("--config", required=True, help="path to config_N.yaml")
-    ap.add_argument("--out", default=None,
-                    help="output root dir (default: <config-dir>/generated)")
+    ap.add_argument("--out", default=None, help="output root dir (default: <config-dir>/generated)")
     args = ap.parse_args()
 
     with open(args.config) as f:
         doc = yaml.safe_load(f)
-    # flatten: top-level `cell` map + the stations/task lists into one dict
-    cell = {**doc["cell"], "stations": doc["stations"], "task": doc["task"]}
+    cell = {**doc["cell"], "robot_mount": doc["robot_mount"], "belt": doc["belt"],
+            "part": doc["part"], "stations": doc["stations"], "task": doc["task"]}
 
     by_id = validate(cell)
 
@@ -225,18 +175,13 @@ def main():
     out_dir = os.path.join(out_root, cell["name"])
     os.makedirs(out_dir, exist_ok=True)
 
-    artifacts = {
-        "world.sdf": emit_world(cell),
-        "scene.yaml": emit_scene(cell),
-        "task.yaml": emit_task(cell, by_id),
-    }
-    for fname, content in artifacts.items():
-        path = os.path.join(out_dir, fname)
-        with open(path, "w") as f:
+    for fname, content in (("scene.yaml", emit_scene(cell, by_id)),
+                           ("task.yaml", emit_task(cell, by_id))):
+        with open(os.path.join(out_dir, fname), "w") as f:
             f.write(content)
-        print(f"  wrote {path}")
+        print(f"  wrote {os.path.join(out_dir, fname)}")
     print(f"[cell_generator] generated {cell['name']} "
-          f"({len(cell['stations'])} stations, {len(cell['task'])} ops) -> {out_dir}")
+          f"({len(cell['stations'])} conveyors, {len(cell['task'])} ops) -> {out_dir}")
 
 
 if __name__ == "__main__":

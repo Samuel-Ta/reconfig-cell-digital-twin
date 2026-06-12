@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""cell_scene_manager — apply the generated MoveIt scene + the IK reachability guard.
+
+    ros2 run cell_scene_manager scene_manager <scene.yaml> <task.yaml>
+
+Config-AGNOSTIC (INVARIANT 2): no knowledge of how many stations/lanes exist; it
+iterates whatever the generated scene.yaml / task.yaml hand it. Same code for every
+config.
+
+Responsibilities (spec §9):
+  1. Load the generated scene spec; build one CollisionObject (BOX) per entry and
+     apply it to the planning scene so MoveIt plans around the fixtures.
+  2. IK reachability guard: for every station's DERIVED target (the exact pose the
+     executor will command, full top-down orientation), run IK respecting joint
+     limits. On the first unreachable station, abort with EXACTLY:
+        Configuration invalid: Station <id> out of physical reach
+     and exit nonzero so the launch does NOT start the executor.
+
+IK feasibility is necessary-but-not-sufficient (proves a reachable pose exists, not a
+collision-free path) — claimed honestly per spec §9.
+
+NOTE: uses a single MoveItPy (no extra rclpy.Node in-process — two nodes segfault),
+matching the proven step-2 pattern. Paths come via argv, not ROS params.
+"""
+import math
+import os
+import random
+import sys
+import time
+
+import rclpy
+from rclpy.logging import get_logger
+
+import yaml
+from geometry_msgs.msg import Pose
+from moveit.planning import MoveItPy
+from moveit.core.robot_state import RobotState
+from moveit_msgs.msg import CollisionObject
+from shape_msgs.msg import SolidPrimitive
+
+GROUP = "ur_manipulator"
+TIP = "rg2_tcp"                 # the RG2 fingertip frame the executor drives to the belt
+UP_SEED = [0.0, -1.5708, -1.5708, -1.5708, 0.0, 0.0]
+IK_SEED_TRIES = 80
+
+
+def build_collision_object(entry, frame_id):
+    co = CollisionObject()
+    co.header.frame_id = frame_id
+    co.id = entry["id"]
+    prim = SolidPrimitive()
+    prim.type = SolidPrimitive.BOX
+    prim.dimensions = [float(d) for d in entry["primitive"]["dimensions"]]
+    p = entry["pose"]
+    pose = Pose()
+    pose.position.x, pose.position.y, pose.position.z = float(p["x"]), float(p["y"]), float(p["z"])
+    pose.orientation.x = float(p.get("qx", 0.0))
+    pose.orientation.y = float(p.get("qy", 0.0))
+    pose.orientation.z = float(p.get("qz", 0.0))
+    pose.orientation.w = float(p.get("qw", 1.0))
+    co.primitives = [prim]
+    co.primitive_poses = [pose]
+    co.operation = CollisionObject.ADD
+    return co
+
+
+def reachable(model, target_pose):
+    """True iff some joint-limit-respecting IK solution exists for `target_pose`."""
+    for i in range(IK_SEED_TRIES):
+        state = RobotState(model)
+        if i == 0:
+            state.set_joint_group_positions(GROUP, list(UP_SEED))
+        else:
+            state.set_joint_group_positions(
+                GROUP, [random.uniform(-math.pi, math.pi) for _ in range(6)])
+        state.update()
+        if state.set_from_ik(GROUP, target_pose, TIP, 0.05):
+            return True
+    return False
+
+
+def main():
+    argv = [a for a in sys.argv[1:] if not a.startswith("--ros-args") and ":=" not in a and a != "--"]
+    if len(argv) < 2:
+        print("usage: scene_manager <scene.yaml> <task.yaml>", file=sys.stderr)
+        return 2
+    scene_path, task_path = argv[0], argv[1]
+    with open(scene_path) as f:
+        scene_spec = yaml.safe_load(f)
+    with open(task_path) as f:
+        task_spec = yaml.safe_load(f)
+    frame_id = scene_spec.get("frame_id", "base_link")
+
+    rclpy.init()
+    logger = get_logger("cell_scene_manager")
+    moveit = MoveItPy(node_name="cell_scene_manager")
+    model = moveit.get_robot_model()
+    psm = moveit.get_planning_scene_monitor()
+
+    # ── 1. apply collision objects (config-agnostic loop) ────────────────────────
+    objs = scene_spec.get("collision_objects", [])
+    with psm.read_write() as scene:
+        for entry in objs:
+            scene.apply_collision_object(build_collision_object(entry, frame_id))
+        scene.current_state.update()
+    time.sleep(0.5)
+    logger.info(f"[scene] applied {len(objs)} collision object(s) from scene.yaml")
+
+    # ── 2. IK reachability guard over the DERIVED targets (config-agnostic) ──────
+    checked = set()
+    for op in task_spec.get("ops", []):
+        sid = op["station"]
+        if sid in checked:
+            continue
+        checked.add(sid)
+        tp = op["target_pose"]
+        pose = Pose()
+        pose.position.x, pose.position.y, pose.position.z = float(tp["x"]), float(tp["y"]), float(tp["z"])
+        pose.orientation.x, pose.orientation.y = float(tp["qx"]), float(tp["qy"])
+        pose.orientation.z, pose.orientation.w = float(tp["qz"]), float(tp["qw"])
+        if reachable(model, pose):
+            logger.info(f"[guard] station {sid}: reachable")
+        else:
+            logger.error(f"Configuration invalid: Station {sid} out of physical reach")
+            _exit(1)
+
+    logger.info(f"[guard] PASSED — all {len(checked)} station(s) reachable; scene applied")
+    _exit(0)
+
+
+def _exit(code):
+    """Force the exit code the launch gate reads, BEFORE MoveItPy's destructor runs:
+    moveit_py segfaults on teardown (corrupting the code to -11). os._exit skips the
+    crashy Python/rclpy cleanup so the guard's pass/fail verdict reaches the gate intact."""
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

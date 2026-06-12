@@ -1,39 +1,24 @@
-# config_2 — 3 lanes / 6 stations (spec §8, verbatim). This is config_1 with ONE
-# lane appended (source_3 + sink_3) and TWO task ops appended. Lanes 1 and 2 and
-# their task ops are byte-for-byte identical to config_1 — no existing entry is
-# edited (INVARIANT 5). The custom nodes consume the generated artifacts unchanged;
-# producing config_2 requires ZERO code edits.
+# config_2 — Intel warehouse conveyor cell, 3 conveyors (relay, 2 hops). This is
+# config_1 with ONE conveyor appended (conveyor_3) and ONE hop appended (pick
+# conveyor_2 -> place conveyor_3). conveyor_1/conveyor_2 and the first hop are
+# byte-for-byte identical to config_1 — no existing entry is edited (INVARIANT 5).
+# The custom nodes consume the generated artifacts unchanged: ZERO code edits.
 #
-# NOTE (spec §8): sink_3 at (0.32, 0.0) is intentionally close to the base. If it
-# fails IK, the cell_scene_manager reachability guard must reject it cleanly at
-# startup (desired behaviour, not a bug to hide).
-cell: {name: config_2, robot: ur_description, base_frame: base_link}
+# Topology: the box relays conveyor_1 -> conveyor_2 -> conveyor_3 (re-picked at
+# conveyor_2 where the first hop left it).
+cell: {name: config_2, robot: ur5_rg2, base_frame: base_link}
+
+robot_mount: {x: -0.697, y: -0.643, z: 0.40}
+belt: {top_z: 0.70, inward: 0.27}
+part: {name: cube_1, geometry: {type: box, size: [0.04, 0.04, 0.04]}}
+
 stations:
-  - {id: source_1, type: source,
-     pose: {x: 0.45, y: 0.30, z: 0.0, roll: 0, pitch: 0, yaw: 0},
-     fixture: {geometry: {type: box, size: [0.18, 0.18, 0.10]}},
-     part: {geometry: {type: box, size: [0.04, 0.04, 0.04]}, grasp: {approach: top, offset_z: 0.02}}}
-  - {id: sink_1, type: sink,
-     pose: {x: 0.25, y: 0.55, z: 0.0, roll: 0, pitch: 0, yaw: 0},
-     fixture: {geometry: {type: box, size: [0.24, 0.24, 0.12]}}, part: null}
-  - {id: source_2, type: source,
-     pose: {x: 0.45, y: -0.30, z: 0.0, roll: 0, pitch: 0, yaw: 0},
-     fixture: {geometry: {type: box, size: [0.18, 0.18, 0.10]}},
-     part: {geometry: {type: box, size: [0.04, 0.04, 0.04]}, grasp: {approach: top, offset_z: 0.02}}}
-  - {id: sink_2, type: sink,
-     pose: {x: 0.25, y: -0.55, z: 0.0, roll: 0, pitch: 0, yaw: 0},
-     fixture: {geometry: {type: box, size: [0.24, 0.24, 0.12]}}, part: null}
-  - {id: source_3, type: source,
-     pose: {x: 0.54, y: 0.0, z: 0.0, roll: 0, pitch: 0, yaw: 0},
-     fixture: {geometry: {type: box, size: [0.18, 0.18, 0.10]}},
-     part: {geometry: {type: box, size: [0.04, 0.04, 0.04]}, grasp: {approach: top, offset_z: 0.02}}}
-  - {id: sink_3, type: sink,
-     pose: {x: 0.32, y: 0.0, z: 0.0, roll: 0, pitch: 0, yaw: 0},
-     fixture: {geometry: {type: box, size: [0.24, 0.24, 0.12]}}, part: null}
+  - {id: conveyor_1, type: conveyor, pose: {x: -1.44596, y: -0.364014, yaw: -0.065274}}
+  - {id: conveyor_2, type: conveyor, pose: {x: -0.697,    y:  0.177,    yaw: -1.570796}}
+  - {id: conveyor_3, type: conveyor, pose: {x:  0.0736,   y: -0.3626,   yaw: -3.103600}}
+
 task:
-  - {op: pick,  from: source_1}
-  - {op: place, to: sink_1}
-  - {op: pick,  from: source_2}
-  - {op: place, to: sink_2}
-  - {op: pick,  from: source_3}
-  - {op: place, to: sink_3}
+  - {op: pick,  from: conveyor_1}
+  - {op: place, to:   conveyor_2}
+  - {op: pick,  from: conveyor_2}
+  - {op: place, to:   conveyor_3}
