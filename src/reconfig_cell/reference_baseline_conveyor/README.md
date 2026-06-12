@@ -36,7 +36,18 @@ edits. Wall-clock time is secondary context only.
 - **Comment lines** (`#`, `<!-- -->`). Counted as 0 on both sides.
 
 Numbers below are **measured from the actual diffs** (`diff config_1 config_2`), not
-estimated. Any unmeasured value is left **TBD**.
+estimated. Any unmeasured value is left **TBD**. The "functional lines added" counts are
+reproduced by dropping comment lines (`#`, `<!--`), blank lines, and the static mesh
+`<uri>` line from the `>` side of each file's diff (the `<world name>` change is a
+*modification*, counted in its own row, not as an addition):
+
+```
+for f in world.sdf scene.yaml task.yaml; do
+  diff config_1/$f config_2/$f | grep '^>' | sed 's/^> //' \
+    | grep -vE '^\s*$|^\s*#|<!--|<uri>|<world name=' | wc -l
+done
+# -> world 5, scene 3, task 2  = 10
+```
 
 ## Measured result — adding one lane (config_1 → config_2)
 
@@ -48,8 +59,8 @@ estimated. Any unmeasured value is left **TBD**.
 | **Re-stated copies of an EXISTING pose** (re-grasp pick) | 0 (generator emits it) | 1 (conveyor_2's literal duplicated in `task.yaml`) |
 | **Task-wiring ops added** | 2 (same file as the topology) | 2 (separate `task.yaml`) |
 | **Modified lines** | **0** (append-only, INVARIANT 5) | 1 (`<world name>` config_1→config_2) |
-| **Functional lines added** (excl. comments + mesh scenery) | **3** | ~10 |
-| Wall-clock reconfig time | seconds (one append) | TBD (longer — 3 frames hand-computed) |
+| **Functional lines added** (excl. comments + mesh scenery) | **3** | **10** (world 5 + scene 3 + task 2) |
+| Wall-clock reconfig time *(context only, not headline)* | TBD — human-timed | TBD — human-timed |
 
 ### The un-dismissable claim
 To add one lane, the framework author writes the conveyor's pose **once**
@@ -60,6 +71,25 @@ three different coordinate frames** (world, scene, task), each needing its own t
 re-state conveyor_2's pose a fourth time for the re-grasp. Any one of those copies drifting
 out of sync silently breaks the cell. That cross-file, cross-frame synchronization is the
 cost the single-source-of-truth design removes.
+
+### Wall-clock reconfig time (practical context — NOT the headline)
+
+The headline stays the structural-coupling metric above; wall-clock is secondary context.
+It is left **TBD pending a human-timed instance** rather than fabricated, for a specific
+reason: the meaningful cost on the baseline side is a human **hand-deriving three
+coordinate transforms** for the new lane (robot-mount subtraction → base_link; inward-shift
++ grasp-z → task target; slab-z + yaw→quaternion → scene BOX) and keeping the three copies
+consistent. An automated agent applying the edits in milliseconds does **not** represent
+that human cognitive cost — reporting agent apply-time would understate the gap and mislead.
+
+**Protocol to fill it in (one human, stopwatch, a few attempts averaged):**
+1. *Framework:* start the clock, append conveyor_3's `{x,y,yaw}` station line + the two task
+   ops to `config_2.yaml`, run `cell_generator`, stop the clock.
+2. *Baseline:* start the clock, add conveyor_3 to `world.sdf` (WORLD pose), **hand-derive**
+   and add its base_link BOX to `scene.yaml` and its grasp target to `task.yaml`, add the two
+   task ops, stop the clock.
+Record each as a measured instance (or the mean of a few attempts) and label it as practical
+context. The structural-coupling numbers above stand on their own regardless of this value.
 
 ## Files
 - `config_1/{world.sdf, scene.yaml, task.yaml}` — frozen config_1 (the rigid baseline).
