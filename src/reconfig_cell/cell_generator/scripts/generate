@@ -166,8 +166,13 @@ def main():
 
     with open(args.config) as f:
         doc = yaml.safe_load(f)
-    cell = {**doc["cell"], "robot_mount": doc["robot_mount"], "belt": doc["belt"],
-            "part": doc["part"], "stations": doc["stations"], "task": doc["task"]}
+    # the config NAME comes from the filename (config_1.yaml -> config_1), NOT a field in
+    # the YAML body. This keeps config_1.yaml's lines byte-for-byte identical inside
+    # config_2.yaml so the reconfiguration diff is purely additions (INVARIANT 5).
+    cfg_name = os.path.splitext(os.path.basename(args.config))[0]
+    cell = {"name": cfg_name, **doc["cell"], "robot_mount": doc["robot_mount"],
+            "belt": doc["belt"], "part": doc["part"], "stations": doc["stations"],
+            "task": doc["task"]}
 
     by_id = validate(cell)
 
