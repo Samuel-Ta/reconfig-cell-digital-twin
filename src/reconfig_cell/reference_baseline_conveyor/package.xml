@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>reference_baseline_conveyor</name>
+  <version>0.1.0</version>
+  <description>Rigid/monolithic baseline for the CONVEYOR cell — the §10 effort-metric
+    comparison point. Frozen generator output for conveyor config_1 as three
+    hand-maintained artifacts (world + scene + task with hardcoded derived targets),
+    reconfigured to config_2 by hand. Scope-matched to the declarative framework so
+    the whole paper is one consistent cell.</description>
+  <maintainer email="user@example.com">user</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

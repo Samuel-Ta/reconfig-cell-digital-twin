@@ -1,0 +1,14 @@
+# FROZEN config_1 baseline — MoveIt planning-scene spec (CONVEYOR cell, spec §10).
+# HAND-MAINTAINED (no generator on this path). Each conveyor is one BOX CollisionObject
+# (belt slab at the belt top, base_link frame). The pose below is the SAME conveyor pose
+# as in world.sdf, but re-expressed in base_link by hand (world - robot_mount, plus the
+# slab z). Keeping this consistent with world.sdf and task.yaml is manual: that is the
+# synchronization cost the §10 metric measures.
+frame_id: base_link
+collision_objects:
+  - id: conveyor_1
+    primitive: {type: BOX, dimensions: [1.0, 0.5, 0.1]}
+    pose: {x: -0.74896, y: 0.278986, z: 0.25, qx: 0, qy: 0, qz: -0.0326312, qw: 0.999467}
+  - id: conveyor_2
+    primitive: {type: BOX, dimensions: [1.0, 0.5, 0.1]}
+    pose: {x: 0, y: 0.82, z: 0.25, qx: 0, qy: 0, qz: -0.707107, qw: 0.707107}

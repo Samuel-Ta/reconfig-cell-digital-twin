@@ -1,0 +1,52 @@
+<?xml version="1.0" ?>
+<!--
+  FROZEN config_1 baseline — Gazebo world content (CONVEYOR cell, spec §10).
+
+  Rigid/monolithic path: the generator (cell_generator) is set aside, so the cell is
+  three hand-maintained artifacts kept consistent BY HAND — this world.sdf, the
+  companion scene.yaml, and task.yaml. Each conveyor's pose is authored INDEPENDENTLY
+  in all three (in three different frames), which is the structural-coupling cost the
+  §10 metric measures.
+
+  This file holds ONLY the config-specific stations for config_1 (conveyor_1,
+  conveyor_2). NOT in this file, by design:
+    * The Intel warehouse decorative backdrop + the UR5+RG2 robot — loaded once by the
+      bringup (INVARIANT 1). Constant across configs, so never in the config-to-config
+      diff.
+
+  COUNTING NOTE (effort metric, honesty): the <include><uri> mesh reference below is
+  STATIC SCENERY — identical boilerplate in the framework output and in this hand
+  baseline. It is NOT reconfiguration work and is EXCLUDED from the metric on both
+  sides. Only what actually changes to add a lane is counted: the conveyor <pose>
+  (WORLD frame) here, its synchronized base_link copies in scene.yaml/task.yaml, the
+  collision primitive, and the task ops.
+-->
+<sdf version="1.6">
+  <world name="config_2">
+
+    <!-- ── conveyor_1 (pick) ─────────────────────────────────────────────── -->
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/Open-RMF/models/DeliveryRobotWithConveyor</uri>
+      <name>delivery_conveyor_1</name>
+      <pose>-1.44596 -0.364014 0.0 0 0 -0.065274</pose>
+      <static>true</static>
+    </include>
+
+    <!-- ── conveyor_2 (place) ────────────────────────────────────────────── -->
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/Open-RMF/models/DeliveryRobotWithConveyor</uri>
+      <name>delivery_conveyor_2</name>
+      <pose>-0.697 0.177 0.0 0 0 -1.570796</pose>
+      <static>true</static>
+    </include>
+
+    <!-- ── conveyor_3 (place) — ADDED for config_2 ───────────────────────── -->
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/Open-RMF/models/DeliveryRobotWithConveyor</uri>
+      <name>delivery_conveyor_3</name>
+      <pose>0.0736 -0.3626 0.0 0 0 -3.103600</pose>
+      <static>true</static>
+    </include>
+
+  </world>
+</sdf>
