@@ -56,6 +56,11 @@ included because planning-time distributions are right-skewed and the mean alone
 
 ## Results (measured on the GUI machine; raw CSVs in `results/`)
 
+> ⚠️ **PROVISIONAL — pending a clean re-run on the detach-fixed code from a fresh-booted
+> sim.** config_1's 29/30 and config_2's 27 below were collected before the DetachableJoint
+> detach-reliability fix and partly against a degrading sim. They are kept for reference but
+> are NOT the final numbers. The clean re-run replaces them (old CSVs retained for transparency).
+
 Per-config descriptive only — **NOT cross-compared** (config_2's 3 lanes inherently does
 more work than config_1's 2). One warmup run per launch excluded from stats. Every seed
 unique within each config. Numbers are read verbatim from the printed summaries
