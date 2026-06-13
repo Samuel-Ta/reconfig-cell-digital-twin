@@ -1,0 +1,14 @@
+================================================================
+  WITHIN-CONFIG RESULTS — config_2  (3 stations, N=27 scored, 2 warmup excluded)  [aggregated from 2 sub-batches]
+================================================================
+  task success      : 27/27  (100.0%)
+  seeds vary        : 27 unique of 27 (min 1001, max 2011)
+  (successful runs)
+  per-op cycle [s]  : mean 29.36  std 0.98  median 29.34  min 28.22  max 33.18
+  full cycle [s]    : mean 117.43  std 3.92  median 117.35  min 112.86  max 132.71
+  total plan [s]    : mean 0.38  std 0.02  median 0.39  min 0.35  max 0.42
+  total exec [s]    : mean 22.19  std 2.65  median 22.94  min 18.44  max 27.65
+  NOTE: per-config descriptive results only — NOT cross-compared with the other
+        config (3 lanes inherently does more work than 2).
+================================================================
+  merged CSV: trials_config_2.csv

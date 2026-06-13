@@ -363,7 +363,11 @@ def summarize(rows, config, n_stations):
 
 
 def main():
-    raw = [a for a in sys.argv[1:] if not a.startswith("--ros-args") and ":=" not in a and a != "--"]
+    # drop everything ROS 2 injects after "--ros-args" (-r, __node:=, --params-file <path> …);
+    # argparse must only see our own flags.
+    raw = sys.argv[1:]
+    if "--ros-args" in raw:
+        raw = raw[:raw.index("--ros-args")]
     ap = argparse.ArgumentParser()
     ap.add_argument("task")
     ap.add_argument("--config", default="config")

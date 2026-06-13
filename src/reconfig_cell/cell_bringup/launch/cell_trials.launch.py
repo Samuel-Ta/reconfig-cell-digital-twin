@@ -42,6 +42,7 @@ def launch_setup(context, *args, **kwargs):
     warmup = LaunchConfiguration("warmup").perform(context)
     op_timeout = LaunchConfiguration("op_timeout").perform(context)
     run_timeout = LaunchConfiguration("run_timeout").perform(context)
+    seed_base = LaunchConfiguration("seed_base").perform(context)
     csv_path = LaunchConfiguration("csv").perform(context) or f"/tmp/trials_{config}.csv"
     launch_rviz = LaunchConfiguration("launch_rviz")
     gazebo_gui = LaunchConfiguration("gazebo_gui")
@@ -148,6 +149,7 @@ def launch_setup(context, *args, **kwargs):
                         arguments=[task_yaml, "--config", config, "--trials", trials,
                                    "--warmup", warmup, "--csv", csv_path,
                                    "--op-timeout", op_timeout, "--run-timeout", run_timeout,
+                                   "--seed-base", seed_base,
                                    "--mount-x", str(mount["x"]), "--mount-y", str(mount["y"])],
                         parameters=[mp_params, common])
 
@@ -182,6 +184,8 @@ def generate_launch_description():
         DeclareLaunchArgument("warmup", default_value="1"),
         DeclareLaunchArgument("op_timeout", default_value="15.0"),
         DeclareLaunchArgument("run_timeout", default_value="180.0"),
+        DeclareLaunchArgument("seed_base", default_value="1000",
+                              description="first run's seed; run i uses seed_base+i (vary across sub-batches)"),
         DeclareLaunchArgument("csv", default_value=""),
         DeclareLaunchArgument("launch_rviz", default_value="false"),
         DeclareLaunchArgument("gazebo_gui", default_value="true"),

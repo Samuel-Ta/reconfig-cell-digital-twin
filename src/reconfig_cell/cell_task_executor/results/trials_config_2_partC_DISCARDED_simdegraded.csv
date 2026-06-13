@@ -1,0 +1,5 @@
+run_idx,config,seed,warmup,n_stations,per_op_plan_time,per_op_exec_time,full_cycle_time,success,failure_cause
+0,config_2,3000,1,3,"0.095","37.456",122.777,0,place_fail
+1,config_2,3001,0,3,"","",8.755090475082397,0,plan_fail
+2,config_2,3002,0,3,"","",8.807834386825562,0,plan_fail
+3,config_2,3003,0,3,"","",8.883385181427002,0,plan_fail

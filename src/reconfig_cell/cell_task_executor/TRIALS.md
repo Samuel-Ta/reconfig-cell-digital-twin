@@ -54,27 +54,46 @@ success count / N; and for **per-op cycle time** (primary unit, more stable than
 cycle) plus full-cycle, total-plan, total-exec time: mean, std, median, min, max. Median is
 included because planning-time distributions are right-skewed and the mean alone misleads.
 
-## Results
+## Results (measured on the GUI machine; raw CSVs in `results/`)
 
-**TBD — not yet run end-to-end.** The runner is built, installed, and the launch wiring is
-verified; the full 30×2 batch must be run on a machine with a working display (the headless
-CI/sandbox here does not start the gz_ros2_control controller_manager). Numbers are left
-TBD rather than fabricated. Fill the two tables below from the printed summaries:
+Per-config descriptive only — **NOT cross-compared** (config_2's 3 lanes inherently does
+more work than config_1's 2). One warmup run per launch excluded from stats. Every seed
+unique within each config. Numbers are read verbatim from the printed summaries
+(`results/summary_config_{1,2}.txt`).
 
-### config_1 (2 lanes, N=TBD)
+### config_1 (2 lanes, N=30, seeds 1000–1030) — `results/trials_config_1.csv`
 | metric | value |
 |---|---|
-| task success | TBD / TBD |
-| per-op cycle [s] | mean TBD, std TBD, median TBD, min TBD, max TBD |
-| full cycle [s] | TBD |
-| total plan / exec [s] | TBD / TBD |
-| failure causes | TBD |
+| task success | **29 / 30 (96.7%)** |
+| per-op cycle [s] *(primary)* | mean 34.93, std 2.23, median 33.91, min 33.33, max 42.98 |
+| full cycle [s] | mean 69.87, std 4.46, median 67.82, min 66.67, max 85.96 |
+| total plan / exec [s] | 0.20 / 12.85 (means) |
+| failure causes | place_fail = 1 |
 
-### config_2 (3 lanes, N=TBD)
+### config_2 (3 lanes, N=27, seeds 1001–1016 + 2001–2011) — `results/trials_config_2.csv`
 | metric | value |
 |---|---|
-| task success | TBD / TBD |
-| per-op cycle [s] | mean TBD, std TBD, median TBD, min TBD, max TBD |
-| full cycle [s] | TBD |
-| total plan / exec [s] | TBD / TBD |
-| failure causes | TBD |
+| task success | **27 / 27 (100%)** |
+| per-op cycle [s] *(primary)* | mean 29.36, std 0.98, median 29.34, min 28.22, max 33.18 |
+| full cycle [s] | mean 117.43, std 3.92, median 117.35, min 112.86, max 132.71 |
+| total plan / exec [s] | 0.38 / 22.19 (means) |
+| failure causes | none |
+
+**Collection note (honesty).** config_1 ran as one clean 31-run batch. config_2 was
+collected in two healthy sub-batches — part A (16, seeds 1001–1016) + part B (11, seeds
+2001–2011) = **27 scored**, above the stated minimum of 20 but short of 30. Reason: on this
+machine a Gazebo session reliably degrades after ~25–40 min of continuous running — the
+`rg2_finger_joint{1,2}` states stop publishing (`Missing … complete state of the robot is
+not yet known` + `Host unreachable`), so MoveIt can no longer get a complete robot state and
+runs fast-fail at the first motion. A top-up "part C" launched into an already-degraded
+machine and produced only infrastructure `plan_fail`s; it was **discarded**
+(`trials_config_2_partC_DISCARDED_simdegraded.csv`) rather than counted, since those are
+harness failures, not task outcomes. The 27 reported runs were all collected while the sim
+was healthy. To reach a clean 30, run part C from a fresh boot:
+`ros2 launch cell_bringup cell_trials.launch.py config:=config_2 trials:=3 seed_base:=3000
+csv:=.../trials_config_2_partC.csv` then re-run `aggregate_trials.py`.
+
+**Planning vs execution (why we logged them separately).** Planning time is tiny and very
+stable (config_1 mean 0.20 s, config_2 0.38 s) while execution carries essentially all the
+cycle-time variance — lumping them would have made the planner look far more variable than it
+is. The remaining bulk of each cycle is the deliberate reset/settle/attach-detach sleeps.

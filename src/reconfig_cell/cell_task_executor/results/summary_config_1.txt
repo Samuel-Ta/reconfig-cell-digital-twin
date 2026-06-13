@@ -1,0 +1,13 @@
+  WITHIN-CONFIG RESULTS — config_1  (2 stations, N=30 scored, 1 warmup excluded)
+================================================================
+  task success      : 29/30  (96.7%)
+  failure causes    : place_fail=1
+  (successful runs)
+  per-op cycle [s]  : mean 34.93  std 2.23  median 33.91  min 33.33  max 42.98
+  full cycle [s]    : mean 69.87  std 4.46  median 67.82  min 66.67  max 85.96
+  total plan [s]    : mean 0.20  std 0.02  median 0.20  min 0.17  max 0.27
+  total exec [s]    : mean 12.85  std 3.68  median 10.92  min 10.77  max 28.92
+  NOTE: per-config descriptive results only — config_1 (2 lanes) and config_2
+        (3 lanes) are NOT cross-compared; 3 lanes inherently does more work.
+================================================================
+  CSV: /home/samitade/reconfig_ws/src/reconfig_cell/cell_task_executor/results/trials_config_1.csv
