@@ -1,0 +1,439 @@
+#!/usr/bin/env python3
+"""cell_task_executor / trial_runner — within-config validation harness (spec §10).
+
+    ros2 run cell_task_executor trial_runner <task.yaml> \
+        --config config_1 --trials 30 --warmup 1 \
+        --csv /tmp/trials_config_1.csv --op-timeout 15 --run-timeout 180 \
+        --mount-x -0.697 --mount-y -0.643
+
+Runs the SAME generated relay task repeatedly and logs each run to CSV, then prints a
+per-config summary. This produces DESCRIPTIVE within-config results only; configs are
+NOT cross-compared (3 lanes inherently does more work than 2 — see the printed note).
+
+Protocol (built so the numbers survive review):
+  * Runs        : --trials per config (default 30, min 20) + --warmup (default 1)
+                  warmup runs are logged with warmup=1 and EXCLUDED from the stats
+                  (first run after launch is slow from planner/IK caching).
+  * Planner seed: random.seed(seed) is set per run with a DIFFERENT seed each run and
+                  the seed is logged. This seeds the IK multi-seed sampler (the dominant
+                  randomness in this pipeline). OMPL's own RNG is left UNSEEDED so it
+                  varies naturally too — we never fix a single seed (which would fake
+                  zero variance).
+  * Reset       : every run starts from an identical state — arm returned to "up", the
+                  part removed and re-spawned at its source, the grasp weld detached.
+  * Timeouts    : --op-timeout (per operation's planning) and --run-timeout (whole run).
+                  A timeout is a FAILURE with cause=timeout, never a hang.
+  * Planning vs execution time are logged SEPARATELY (planning is the variable part;
+                  lumping them hides where variance comes from).
+
+CSV columns: run_idx, config, seed, warmup, n_stations, per_op_plan_time,
+             per_op_exec_time, full_cycle_time, success, failure_cause
+Failure taxonomy: plan_fail | grasp_fail | place_fail | timeout | none
+Success = the carried part ends within tolerance of the final sink; anything else=failure.
+"""
+import argparse
+import math
+import os
+import random
+import statistics
+import subprocess
+import sys
+import time
+
+import rclpy
+from rclpy.logging import get_logger
+
+import yaml
+from geometry_msgs.msg import Pose
+from moveit.planning import MoveItPy
+from moveit.core.robot_state import RobotState
+
+GROUP = "ur_manipulator"
+TCP = "rg2_tcp"
+APPROACH_CLEAR = 0.15
+UP_SEED = [0.0, -1.5708, -1.5708, -1.5708, 0.0, 0.0]
+FINGER_OPEN, FINGER_CLOSE = 0.65, -1.10
+SINK_TOL_XY = 0.18          # part must land this close (m, world XY) to the last sink
+
+
+# ── gz + finger helpers (identical mechanism to task_executor) ─────────────────────
+def gz_pub(topic, times=3, gap=0.4):
+    for _ in range(times):
+        subprocess.run(["gz", "topic", "-t", topic, "-m", "gz.msgs.Empty", "-p", ""], check=False)
+        time.sleep(gap)
+
+
+def set_fingers(cmd, settle=1.0):
+    for _ in range(4):
+        for t in ("/rg2/finger1_cmd", "/rg2/finger2_cmd"):
+            subprocess.run(["gz", "topic", "-t", t, "-m", "gz.msgs.Double", "-p", f"data: {cmd}"], check=False)
+        time.sleep(0.15)
+    time.sleep(settle)
+
+
+def model_pose_xyz(name):
+    import re
+    r = subprocess.run(["gz", "model", "-m", name, "-p"], capture_output=True, text=True, timeout=8)
+    m = re.search(r"\[\s*([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s*\]", r.stdout)
+    return (float(m.group(1)), float(m.group(2)), float(m.group(3))) if m else None
+
+
+def model_z(name):
+    p = model_pose_xyz(name)
+    return p[2] if p else None
+
+
+def model_exists(name):
+    r = subprocess.run(["gz", "model", "-m", name, "-p"], capture_output=True, text=True, timeout=8)
+    return "Pose" in r.stdout
+
+
+def spawn_cube(name, wx, wy, wz, logger):
+    from ament_index_python.packages import get_package_share_directory
+    sdf = os.path.join(get_package_share_directory("cell_bringup"), "models", "cube_part_rg2.sdf")
+    if model_exists(name):
+        subprocess.run(["ros2", "run", "ros_gz_sim", "remove", "--ros-args",
+                        "-p", f"entity_name:={name}"], check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _ in range(20):
+            time.sleep(0.3)
+            if not model_exists(name):
+                break
+    subprocess.run(["ros2", "run", "ros_gz_sim", "create", "-file", sdf, "-name", name,
+                    "-x", str(wx), "-y", str(wy), "-z", str(wz)], check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(1.0)
+
+
+# ── IK (multi-seed, collision-checked, elbow-up; identical to task_executor) ───────
+def quat_mul(a, b):
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return (aw*bx + ax*bw + ay*bz - az*by, aw*by - ax*bz + ay*bw + az*bx,
+            aw*bz + ax*by - ay*bx + az*bw, aw*bw - ax*bx - ay*by - az*bz)
+
+
+def topdown_quat(yaw):
+    return quat_mul((0.0, 0.0, math.sin(yaw/2), math.cos(yaw/2)), (1.0, 0.0, 0.0, 0.0))
+
+
+def solve_ik(model, psm, x, y, z, seed, logger, label, nominal=None):
+    qx, qy, qz, qw = topdown_quat(0.0)
+    pose = Pose()
+    pose.position.x, pose.position.y, pose.position.z = float(x), float(y), float(z)
+    pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w = qx, qy, qz, qw
+    SHOULDER_LIFT = 1
+    best_q = best_fb = None
+    best_score = best_fb_score = float("inf")
+    for i in range(120):
+        state = RobotState(model)
+        if i == 0:
+            state.set_joint_group_positions(GROUP, list(seed))
+        else:
+            state.set_joint_group_positions(GROUP, [random.uniform(-math.pi, math.pi) for _ in range(6)])
+        state.update()
+        if not state.set_from_ik(GROUP, pose, TCP, 0.05):
+            continue
+        state.update()
+        q = list(state.get_joint_group_positions(GROUP))
+        with psm.read_only() as scene:
+            if scene.is_state_colliding(robot_state=state, joint_model_group_name=GROUP, verbose=False):
+                continue
+        score = sum((a - b) ** 2 for a, b in zip(q, nominal)) if nominal is not None else max(abs(v) for v in q)
+        if score < best_fb_score:
+            best_fb_score, best_fb = score, q
+        if q[SHOULDER_LIFT] <= -0.5 and score < best_score:
+            best_score, best_q = score, q
+    if best_q is None:
+        best_q = best_fb
+    if best_q is None:
+        return None
+    goal = RobotState(model)
+    goal.set_joint_group_positions(GROUP, best_q)
+    goal.update()
+    return goal
+
+
+# ── timed motion: returns (ok, plan_time, exec_time) ───────────────────────────────
+def timed_move(arm, robot, goal, label, op_timeout, attempts=6):
+    """Plan (timed, with a per-op planning budget) then execute (timed)."""
+    arm.set_start_state_to_current_state()
+    arm.set_goal_state(robot_state=goal)
+    t0 = time.time()
+    result = None
+    for _ in range(attempts):
+        result = arm.plan()
+        if result:
+            break
+        if time.time() - t0 > op_timeout:
+            return False, "timeout", time.time() - t0, 0.0
+    plan_t = time.time() - t0
+    if not result:
+        return False, "plan_fail", plan_t, 0.0
+    if plan_t > op_timeout:
+        return False, "timeout", plan_t, 0.0
+    te = time.time()
+    robot.execute(result.trajectory, controllers=[])
+    time.sleep(0.3)
+    return True, "none", plan_t, time.time() - te
+
+
+def move_named(arm, robot, name, op_timeout):
+    arm.set_start_state_to_current_state()
+    arm.set_goal_state(configuration_name=name)
+    t0 = time.time()
+    result = None
+    for _ in range(6):
+        result = arm.plan()
+        if result:
+            break
+        if time.time() - t0 > op_timeout:
+            return False
+    if not result:
+        return False
+    robot.execute(result.trajectory, controllers=[])
+    time.sleep(0.3)
+    return True
+
+
+# ── one trial ──────────────────────────────────────────────────────────────────────
+def run_trial(moveit, arm, model, psm, logger, ops, part, spawn_pose, sink_world,
+              op_timeout, run_timeout):
+    """Execute the full relay once from a clean reset. Returns a result dict."""
+    res = {"per_op_plan": [], "per_op_exec": [], "cycle": 0.0, "success": False, "cause": "none"}
+    t_run = time.time()
+
+    def over_run():
+        return time.time() - t_run > run_timeout
+
+    # ---- reset to identical initial state ----
+    set_fingers(FINGER_OPEN, settle=0.5)
+    if not move_named(arm, moveit, "up", op_timeout):
+        res["cause"] = "plan_fail"
+        res["cycle"] = time.time() - t_run
+        return res
+    spawn_cube(part, spawn_pose["x"], spawn_pose["y"], spawn_pose["z"], logger)
+    gz_pub(f"/{part}/detach")
+    time.sleep(0.5)
+
+    seed = list(UP_SEED)
+    spawned_first = True   # cube already spawned by the reset above
+
+    for idx, op in enumerate(ops):
+        if over_run():
+            res["cause"] = "timeout"
+            break
+        tp = op["target_pose"]
+        op_plan = op_exec = 0.0
+
+        ap_st = solve_ik(model, psm, tp["x"], tp["y"], tp["z"] + APPROACH_CLEAR, seed,
+                         logger, f"op{idx}.approach")
+        if ap_st is None:
+            res["cause"] = "plan_fail"
+            break
+        ap_q = list(ap_st.get_joint_group_positions(GROUP))
+        de_st = solve_ik(model, psm, tp["x"], tp["y"], tp["z"], ap_q, logger,
+                         f"op{idx}.descend", nominal=ap_q)
+        if de_st is None:
+            res["cause"] = "plan_fail"
+            break
+
+        st = op["station"]
+        fail_cause = "place_fail" if op["op"] == "place" else "plan_fail"
+
+        # approach
+        ok, cause, pt, et = timed_move(arm, moveit, ap_st, f"{st}.approach", op_timeout)
+        op_plan += pt; op_exec += et
+        if not ok:
+            res["cause"] = "timeout" if cause == "timeout" else fail_cause
+            break
+        # descend
+        ok, cause, pt, et = timed_move(arm, moveit, de_st, f"{st}.descend", op_timeout)
+        op_plan += pt; op_exec += et
+        if not ok:
+            res["cause"] = "timeout" if cause == "timeout" else fail_cause
+            break
+
+        if op["op"] == "pick":
+            gz_pub(f"/{part}/detach")
+            time.sleep(0.8)
+            pre_z = model_z(part)
+            set_fingers(FINGER_CLOSE, settle=0.8)
+            grasped = False
+            for attempt in range(1, 4):
+                if over_run():
+                    res["cause"] = "timeout"
+                    break
+                gz_pub(f"/{part}/attach")
+                time.sleep(0.8)
+                ok, cause, pt, et = timed_move(arm, moveit, ap_st, f"{st}.retreat", op_timeout)
+                op_plan += pt; op_exec += et
+                if not ok:
+                    res["cause"] = "timeout" if cause == "timeout" else "plan_fail"
+                    break
+                z = model_z(part)
+                if z is not None and pre_z is not None and z > pre_z + 0.05:
+                    grasped = True
+                    break
+                if attempt < 3:
+                    ok, cause, pt, et = timed_move(arm, moveit, de_st, f"{st}.re-descend", op_timeout)
+                    op_plan += pt; op_exec += et
+                    if not ok:
+                        res["cause"] = "timeout" if cause == "timeout" else "plan_fail"
+                        break
+            if res["cause"] != "none":
+                break
+            if not grasped:
+                res["cause"] = "grasp_fail"
+                break
+            seed = ap_q
+        else:  # place
+            gz_pub(f"/{part}/detach")
+            set_fingers(FINGER_OPEN, settle=0.8)
+            time.sleep(0.5)
+            ok, cause, pt, et = timed_move(arm, moveit, ap_st, f"{st}.retreat", op_timeout)
+            op_plan += pt; op_exec += et
+            if not ok:
+                res["cause"] = "timeout" if cause == "timeout" else "place_fail"
+                break
+            seed = ap_q
+
+        res["per_op_plan"].append(round(op_plan, 3))
+        res["per_op_exec"].append(round(op_exec, 3))
+
+    res["cycle"] = round(time.time() - t_run, 3)
+
+    # ---- success = part ended within tolerance of the final sink (world XY) ----
+    if res["cause"] == "none":
+        move_named(arm, moveit, "up", op_timeout)
+        p = model_pose_xyz(part)
+        if p is None:
+            res["cause"] = "place_fail"
+        elif sink_world is not None:
+            dxy = math.hypot(p[0] - sink_world[0], p[1] - sink_world[1])
+            if dxy > SINK_TOL_XY:
+                res["cause"] = "place_fail"
+                logger.warn(f"part ended {dxy:.3f} m from sink (tol {SINK_TOL_XY}) -> place_fail")
+        res["success"] = res["cause"] == "none"
+    return res
+
+
+# ── stats ───────────────────────────────────────────────────────────────────────────
+def summarize(rows, config, n_stations):
+    kept = [r for r in rows if not r["warmup"]]
+    ok = [r for r in kept if r["success"]]
+    n = len(kept)
+    print("\n" + "=" * 64)
+    print(f"  WITHIN-CONFIG RESULTS — {config}  ({n_stations} stations, N={n} scored, "
+          f"{len(rows)-n} warmup excluded)")
+    print("=" * 64)
+    print(f"  task success      : {len(ok)}/{n}"
+          + (f"  ({100*len(ok)/n:.1f}%)" if n else ""))
+    causes = {}
+    for r in kept:
+        if not r["success"]:
+            causes[r["cause"]] = causes.get(r["cause"], 0) + 1
+    if causes:
+        print(f"  failure causes    : " + ", ".join(f"{k}={v}" for k, v in sorted(causes.items())))
+
+    def stat_block(label, values):
+        if not values:
+            print(f"  {label:<18}: (no successful runs)")
+            return
+        line = (f"mean {statistics.mean(values):.2f}  "
+                f"std {statistics.pstdev(values):.2f}  "
+                f"median {statistics.median(values):.2f}  "
+                f"min {min(values):.2f}  max {max(values):.2f}")
+        print(f"  {label:<18}: {line}")
+
+    cyc = [r["cycle"] for r in ok]
+    # per-operation cycle time = full cycle / n_ops (primary unit; more stable than full)
+    n_ops = len(ok[0]["per_op_plan"]) if ok and ok[0]["per_op_plan"] else None
+    per_op_cyc = [c / n_ops for c in cyc] if n_ops else []
+    plan_tot = [sum(r["per_op_plan"]) for r in ok]
+    exec_tot = [sum(r["per_op_exec"]) for r in ok]
+    print("  (successful runs)")
+    stat_block("per-op cycle [s]", per_op_cyc)     # PRIMARY
+    stat_block("full cycle [s]", cyc)
+    stat_block("total plan [s]", plan_tot)
+    stat_block("total exec [s]", exec_tot)
+    print("  NOTE: per-config descriptive results only — config_1 (2 lanes) and config_2")
+    print("        (3 lanes) are NOT cross-compared; 3 lanes inherently does more work.")
+    print("=" * 64)
+
+
+def main():
+    raw = [a for a in sys.argv[1:] if not a.startswith("--ros-args") and ":=" not in a and a != "--"]
+    ap = argparse.ArgumentParser()
+    ap.add_argument("task")
+    ap.add_argument("--config", default="config")
+    ap.add_argument("--trials", type=int, default=30)
+    ap.add_argument("--warmup", type=int, default=1)
+    ap.add_argument("--csv", default="/tmp/trials.csv")
+    ap.add_argument("--op-timeout", type=float, default=15.0)
+    ap.add_argument("--run-timeout", type=float, default=180.0)
+    ap.add_argument("--seed-base", type=int, default=1000)
+    ap.add_argument("--mount-x", type=float, default=None)
+    ap.add_argument("--mount-y", type=float, default=None)
+    args = ap.parse_args(raw)
+
+    with open(args.task) as f:
+        task = yaml.safe_load(f)
+    ops = task["ops"]
+    part = task.get("part", "cube_1")
+    spawn_pose = next((o["spawn_pose"] for o in ops if "spawn_pose" in o), None)
+    if spawn_pose is None:
+        print("trial_runner: task has no spawn_pose (need a first pick)", file=sys.stderr)
+        return 2
+    n_stations = len({o["station"] for o in ops})
+
+    # final sink in WORLD (last place op's base_link target + robot mount), if mount given
+    last_place = next((o for o in reversed(ops) if o["op"] == "place"), None)
+    sink_world = None
+    if last_place and args.mount_x is not None and args.mount_y is not None:
+        sink_world = (last_place["target_pose"]["x"] + args.mount_x,
+                      last_place["target_pose"]["y"] + args.mount_y)
+
+    rclpy.init()
+    logger = get_logger("trial_runner")
+    moveit = MoveItPy(node_name="trial_runner")
+    arm = moveit.get_planning_component(GROUP)
+    model = moveit.get_robot_model()
+    psm = moveit.get_planning_scene_monitor()
+    logger.info(f"trial_runner up: {args.config} {n_stations} stations, "
+                f"{args.trials} trials + {args.warmup} warmup")
+
+    rows = []
+    header = ["run_idx", "config", "seed", "warmup", "n_stations",
+              "per_op_plan_time", "per_op_exec_time", "full_cycle_time", "success", "failure_cause"]
+    with open(args.csv, "w") as cf:
+        cf.write(",".join(header) + "\n")
+        total = args.warmup + args.trials
+        try:
+            for run_idx in range(total):
+                is_warmup = run_idx < args.warmup
+                seed = args.seed_base + run_idx
+                random.seed(seed)                       # vary IK sampler seed; OMPL stays unseeded
+                tag = "WARMUP" if is_warmup else f"{run_idx - args.warmup + 1}/{args.trials}"
+                logger.info(f"=== {args.config} run {tag} (seed={seed}) ===")
+                r = run_trial(moveit, arm, model, psm, logger, ops, part, spawn_pose,
+                              sink_world, args.op_timeout, args.run_timeout)
+                r["warmup"] = is_warmup
+                rows.append(r)
+                cf.write(",".join([
+                    str(run_idx), args.config, str(seed), "1" if is_warmup else "0", str(n_stations),
+                    '"' + ";".join(map(str, r["per_op_plan"])) + '"',
+                    '"' + ";".join(map(str, r["per_op_exec"])) + '"',
+                    str(r["cycle"]), "1" if r["success"] else "0", r["cause"],
+                ]) + "\n")
+                cf.flush()
+                logger.info(f"    -> success={r['success']} cause={r['cause']} cycle={r['cycle']}s")
+        finally:
+            summarize(rows, args.config, n_stations)
+            print(f"  CSV: {args.csv}")
+            sys.stdout.flush(); sys.stderr.flush()
+            os._exit(0)   # avoid MoveItPy teardown segfault corrupting the exit
+
+
+if __name__ == "__main__":
+    main()
