@@ -88,6 +88,14 @@ def model_exists(name):
     return "Pose" in r.stdout
 
 
+def part_free_at(name, x, y, z_max, xy_tol=0.18):
+    """True if `name` is resting at (x,y) below z_max — i.e. free at its source, NOT hanging
+    from the gripper. Used to confirm the gripper is empty (a welded cube would be elsewhere
+    and high)."""
+    p = model_pose_xyz(name)
+    return (p is not None and abs(p[0] - x) < xy_tol and abs(p[1] - y) < xy_tol and p[2] < z_max)
+
+
 def spawn_cube(name, wx, wy, wz, logger):
     from ament_index_python.packages import get_package_share_directory
     sdf = os.path.join(get_package_share_directory("cell_bringup"), "models", "cube_part_rg2.sdf")
@@ -200,21 +208,46 @@ def move_named(arm, robot, name, op_timeout):
 def run_trial(moveit, arm, model, psm, logger, ops, part, spawn_pose, sink_world,
               op_timeout, run_timeout):
     """Execute the full relay once from a clean reset. Returns a result dict."""
-    res = {"per_op_plan": [], "per_op_exec": [], "cycle": 0.0, "success": False, "cause": "none"}
+    res = {"per_op_plan": [], "per_op_exec": [], "cycle": 0.0, "success": False,
+           "cause": "none", "gripper_clear": False}
     t_run = time.time()
 
     def over_run():
         return time.time() - t_run > run_timeout
 
-    # ---- reset to identical initial state ----
+    # ---- DEFENSIVE reset: no run may ever inherit a welded cube from the previous run ----
+    # 1) force-release anything still attached to the gripper (a failed place in run K-1
+    #    may have left the cube welded — fire-and-forget detach can drop).
+    gz_pub(f"/{part}/detach", times=4)
     set_fingers(FINGER_OPEN, settle=0.5)
     if not move_named(arm, moveit, "up", op_timeout):
         res["cause"] = "plan_fail"
         res["cycle"] = time.time() - t_run
         return res
+    # 2) respawn at the source — remove+create destroys any leftover DetachableJoint — then
+    #    detach again so the fresh cube is not auto-attached.
     spawn_cube(part, spawn_pose["x"], spawn_pose["y"], spawn_pose["z"], logger)
-    gz_pub(f"/{part}/detach")
+    gz_pub(f"/{part}/detach", times=4)
     time.sleep(0.5)
+    # 3) VERIFY the gripper is empty: the fresh cube must rest at its source (low z), not be
+    #    hanging at the gripper. Retry the force-detach+respawn once if not.
+    z_clear = spawn_pose["z"] + 0.10
+    clear = part_free_at(part, spawn_pose["x"], spawn_pose["y"], z_clear)
+    if not clear:
+        gz_pub(f"/{part}/detach", times=6)
+        spawn_cube(part, spawn_pose["x"], spawn_pose["y"], spawn_pose["z"], logger)
+        time.sleep(0.6)
+        clear = part_free_at(part, spawn_pose["x"], spawn_pose["y"], z_clear)
+    res["gripper_clear"] = clear
+    pp = model_pose_xyz(part)
+    logger.info(f"[run] gripper clear at start: {clear} "
+                f"(part at {None if pp is None else tuple(round(v, 2) for v in pp)})")
+    if not clear:
+        # independence cannot be guaranteed — abort this run cleanly rather than poison it
+        logger.error("[run] gripper NOT clear after re-detach+respawn; aborting run")
+        res["cause"] = "place_fail"
+        res["cycle"] = time.time() - t_run
+        return res
 
     seed = list(UP_SEED)
     spawned_first = True   # cube already spawned by the reset above
@@ -288,13 +321,38 @@ def run_trial(moveit, arm, model, psm, logger, ops, part, spawn_pose, sink_world
                 break
             seed = ap_q
         else:  # place
-            gz_pub(f"/{part}/detach")
-            set_fingers(FINGER_OPEN, settle=0.8)
-            time.sleep(0.5)
-            ok, cause, pt, et = timed_move(arm, moveit, ap_st, f"{st}.retreat", op_timeout)
-            op_plan += pt; op_exec += et
-            if not ok:
-                res["cause"] = "timeout" if cause == "timeout" else "place_fail"
+            # CONFIRMED detach (not fire-and-forget): command release, then verify the cube
+            # did NOT follow the gripper up on retreat. If it did, the detach dropped — retry.
+            pre_rel_z = model_z(part)            # cube resting in the gripper at the belt
+            detached = False
+            for datt in range(1, 4):
+                if over_run():
+                    res["cause"] = "timeout"
+                    break
+                gz_pub(f"/{part}/detach", times=4)
+                set_fingers(FINGER_OPEN, settle=0.7)
+                ok, cause, pt, et = timed_move(arm, moveit, ap_st, f"{st}.retreat", op_timeout)
+                op_plan += pt; op_exec += et
+                if not ok:
+                    res["cause"] = "timeout" if cause == "timeout" else "place_fail"
+                    break
+                post_z = model_z(part)
+                # detached iff the cube stayed at the belt (did not rise with the gripper)
+                if post_z is None or pre_rel_z is None or post_z <= pre_rel_z + 0.06:
+                    detached = True
+                    break
+                logger.warn(f"detach NOT confirmed at {st} (cube z {pre_rel_z:.2f}->{post_z:.2f}); "
+                            f"retry {datt}/3")
+                if datt < 3:
+                    ok, cause, pt, et = timed_move(arm, moveit, de_st, f"{st}.re-descend", op_timeout)
+                    op_plan += pt; op_exec += et
+                    if not ok:
+                        res["cause"] = "timeout" if cause == "timeout" else "place_fail"
+                        break
+            if res["cause"] != "none":
+                break
+            if not detached:
+                res["cause"] = "place_fail"
                 break
             seed = ap_q
 
