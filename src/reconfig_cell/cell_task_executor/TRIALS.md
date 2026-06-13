@@ -56,47 +56,52 @@ included because planning-time distributions are right-skewed and the mean alone
 
 ## Results (measured on the GUI machine; raw CSVs in `results/`)
 
-> ⚠️ **PROVISIONAL — pending a clean re-run on the detach-fixed code from a fresh-booted
-> sim.** config_1's 29/30 and config_2's 27 below were collected before the DetachableJoint
-> detach-reliability fix and partly against a degrading sim. They are kept for reference but
-> are NOT the final numbers. The clean re-run replaces them (old CSVs retained for transparency).
-
-Per-config descriptive only — **NOT cross-compared** (config_2's 3 lanes inherently does
-more work than config_1's 2). One warmup run per launch excluded from stats. Every seed
+Clean re-run on the DetachableJoint detach-reliability-fixed code (HEAD), each config
+collected as **N=30 scored** across fresh-booted, healthy sub-batches (no degraded runs
+kept). Per-config descriptive only — **NOT cross-compared** (config_2's 3 lanes inherently
+does more work than config_1's 2). One warmup run per launch excluded from stats. Every seed
 unique within each config. Numbers are read verbatim from the printed summaries
 (`results/summary_config_{1,2}.txt`).
 
-### config_1 (2 lanes, N=30, seeds 1000–1030) — `results/trials_config_1.csv`
+### config_1 (2 lanes, N=30, seeds 1001–1015 + 2001–2015) — `results/trials_config_1.csv`
+| metric | value |
+|---|---|
+| task success | **28 / 30 (93.3%)** |
+| per-op cycle [s] *(primary)* | mean 42.07, std 1.67, median 42.19, min 39.10, max 45.79 |
+| full cycle [s] | mean 84.14, std 3.34, median 84.38, min 78.20, max 91.58 |
+| total plan / exec [s] | 0.25 / 13.78 (means) |
+| failure causes | grasp_fail = 1, place_fail = 1 |
+
+### config_2 (3 lanes, N=30, seeds 1001–1007 + 2001–2010 + 3001–3010 + 4001–4003) — `results/trials_config_2.csv`
 | metric | value |
 |---|---|
 | task success | **29 / 30 (96.7%)** |
-| per-op cycle [s] *(primary)* | mean 34.93, std 2.23, median 33.91, min 33.33, max 42.98 |
-| full cycle [s] | mean 69.87, std 4.46, median 67.82, min 66.67, max 85.96 |
-| total plan / exec [s] | 0.20 / 12.85 (means) |
+| per-op cycle [s] *(primary)* | mean 34.53, std 1.63, median 34.39, min 31.86, max 36.94 |
+| full cycle [s] | mean 138.11, std 6.51, median 137.55, min 127.44, max 147.75 |
+| total plan / exec [s] | 0.47 / 25.71 (means) |
 | failure causes | place_fail = 1 |
 
-### config_2 (3 lanes, N=27, seeds 1001–1016 + 2001–2011) — `results/trials_config_2.csv`
-| metric | value |
-|---|---|
-| task success | **27 / 27 (100%)** |
-| per-op cycle [s] *(primary)* | mean 29.36, std 0.98, median 29.34, min 28.22, max 33.18 |
-| full cycle [s] | mean 117.43, std 3.92, median 117.35, min 112.86, max 132.71 |
-| total plan / exec [s] | 0.38 / 22.19 (means) |
-| failure causes | none |
+**Collection note (honesty).** On this machine a Gazebo session reliably degrades after
+~25–40 min of continuous running — the `rg2_finger_joint{1,2}` states stop publishing
+(`Missing … complete state of the robot is not yet known` + `Host unreachable`), so MoveIt
+can no longer get a complete robot state and runs fast-fail at the first motion. To keep
+every scored run inside a healthy window, each config was collected as short sub-batches
+from fresh boots, each with a distinct `seed_base` so all 30 seeds stay unique, then merged
+with `aggregate_trials.py`: config_1 = part A (15, seeds 1001–1015) + part B (15, seeds
+2001–2015); config_2 = part A (7, 1001–1007) + part B (10, 2001–2010) + part C (10,
+3001–3010) + part D (3, 4001–4003). Any batch that showed the degradation signature was
+discarded and re-collected, never counted (discarded CSVs retained with a `_DISCARDED_*`
+suffix for transparency). Earlier pre-fix provisional CSVs are kept as
+`trials_config_*_provisional.csv`.
 
-**Collection note (honesty).** config_1 ran as one clean 31-run batch. config_2 was
-collected in two healthy sub-batches — part A (16, seeds 1001–1016) + part B (11, seeds
-2001–2011) = **27 scored**, above the stated minimum of 20 but short of 30. Reason: on this
-machine a Gazebo session reliably degrades after ~25–40 min of continuous running — the
-`rg2_finger_joint{1,2}` states stop publishing (`Missing … complete state of the robot is
-not yet known` + `Host unreachable`), so MoveIt can no longer get a complete robot state and
-runs fast-fail at the first motion. A top-up "part C" launched into an already-degraded
-machine and produced only infrastructure `plan_fail`s; it was **discarded**
-(`trials_config_2_partC_DISCARDED_simdegraded.csv`) rather than counted, since those are
-harness failures, not task outcomes. The 27 reported runs were all collected while the sim
-was healthy. To reach a clean 30, run part C from a fresh boot:
-`ros2 launch cell_bringup cell_trials.launch.py config:=config_2 trials:=3 seed_base:=3000
-csv:=.../trials_config_2_partC.csv` then re-run `aggregate_trials.py`.
+**Did the detach fix change the failure count?** The DetachableJoint fix (confirmed detach +
+defensive pre-spawn reset + per-run "gripper clear at start" log) did **not** reduce the
+genuine task-failure count — config_1's 2 failures and config_2's 1 are real grasp/place IK
+outcomes, not weld artifacts. What it changed is **run independence**: every one of the 60
+scored runs logged `gripper clear at start: True` (0 dirty starts), and observed failures no
+longer cascade — e.g. config_2 part C run 8 (place_fail, seed 3007) was immediately followed
+by a clean success, where pre-fix a leftover weld could carry a failure into the next run.
+The numbers above are therefore independent per-run outcomes, not a contaminated sequence.
 
 **Planning vs execution (why we logged them separately).** Planning time is tiny and very
 stable (config_1 mean 0.20 s, config_2 0.38 s) while execution carries essentially all the

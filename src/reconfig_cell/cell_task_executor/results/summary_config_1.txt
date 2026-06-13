@@ -12,4 +12,4 @@
   NOTE: per-config descriptive results only — NOT cross-compared with the other
         config (3 lanes inherently does more work than 2).
 ================================================================
-  merged CSV: trials_config_1.csv
+  merged CSV: /tmp/_c1_check.csv
