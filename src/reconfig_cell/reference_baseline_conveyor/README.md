@@ -25,7 +25,16 @@ coupling**, not modelling choices.
 The headline metric is **structural coupling**, NOT raw line count:
 (a) artifacts/files touched, (b) distinct edit sites, (c) **synchronized copies of each
 new pose** that must be kept consistent by hand across world/scene/task, (d) task-wiring
-edits. Wall-clock time is secondary context only.
+edits.
+
+**Effort is reported as countable edit operations, never as wall-clock time.** A stopwatch
+number is skill-dependent (an expert and a novice produce wildly different times for the
+*same* edit) and therefore not reproducible. We instead report reconfiguration effort as
+**discrete, countable edit operations** — edit sites, files touched, hand-derived coordinate
+transforms, and synchronized value-copies. Those are **expert-independent** and **verifiable
+directly from the diffs** (`diff -r config_1 config_2`), so anyone can reproduce the exact
+integers. (The earlier TBD wall-clock row and its stopwatch protocol are superseded by this
+and removed; they remain in git history.)
 
 **Excluded from the count on BOTH sides (explicitly, so it is on record):**
 - **Static visual-mesh boilerplate.** The conveyor `<include><uri>…DeliveryRobotWithConveyor</uri>`
@@ -60,7 +69,6 @@ done
 | **Task-wiring ops added** | 2 (same file as the topology) | 2 (separate `task.yaml`) |
 | **Modified lines** | **0** (append-only, INVARIANT 5) | 1 (`<world name>` config_1→config_2) |
 | **Functional lines added** (excl. comments + mesh scenery) | **3** | **10** (world 5 + scene 3 + task 2) |
-| Wall-clock reconfig time *(context only, not headline)* | TBD — human-timed | TBD — human-timed |
 
 ### The un-dismissable claim
 To add one lane, the framework author writes the conveyor's pose **once**
@@ -72,24 +80,49 @@ re-state conveyor_2's pose a fourth time for the re-grasp. Any one of those copi
 out of sync silently breaks the cell. That cross-file, cross-frame synchronization is the
 cost the single-source-of-truth design removes.
 
-### Wall-clock reconfig time (practical context — NOT the headline)
+### Reconfiguration effort as edit operations (supporting context — NOT the headline)
 
-The headline stays the structural-coupling metric above; wall-clock is secondary context.
-It is left **TBD pending a human-timed instance** rather than fabricated, for a specific
-reason: the meaningful cost on the baseline side is a human **hand-deriving three
-coordinate transforms** for the new lane (robot-mount subtraction → base_link; inward-shift
-+ grasp-z → task target; slab-z + yaw→quaternion → scene BOX) and keeping the three copies
-consistent. An automated agent applying the edits in milliseconds does **not** represent
-that human cognitive cost — reporting agent apply-time would understate the gap and mislead.
+The structural-coupling table above stays the headline. This supporting table recasts the
+**same** config_1 → config_2 change as countable **edit operations** — replacing the old
+wall-clock measure with an expert-independent count that is reproducible directly from the
+diffs. Every cell is an **exact integer read from the actual files** (`diff -r config_1
+config_2`), no estimates and no times.
 
-**Protocol to fill it in (one human, stopwatch, a few attempts averaged):**
-1. *Framework:* start the clock, append conveyor_3's `{x,y,yaw}` station line + the two task
-   ops to `config_2.yaml`, run `cell_generator`, stop the clock.
-2. *Baseline:* start the clock, add conveyor_3 to `world.sdf` (WORLD pose), **hand-derive**
-   and add its base_link BOX to `scene.yaml` and its grasp target to `task.yaml`, add the two
-   task ops, stop the clock.
-Record each as a measured instance (or the mean of a few attempts) and label it as practical
-context. The structural-coupling numbers above stand on their own regardless of this value.
+| Measure (adding one lane, config_1 → config_2) | Framework (1 YAML + generator) | Rigid baseline (3 hand files) |
+|---|---:|---:|
+| **Edit operations** (distinct diff hunks) | **2** | **4** |
+| **Files touched** | **1** | **3** |
+| **Hand-derived coordinate transforms** | **0** | **2** |
+| **Synchronized value-copies** (pose instances hand-kept consistent) | **1** | **4** |
+
+**How each integer is derived from the diffs (verify, don't trust):**
+- **Edit operations** = number of distinct change hunks in `diff config_1/* config_2/*`.
+  *Framework:* 2 hunks in `config_2.yaml` — append the `conveyor_3` station line, append the
+  two task ops (`config_1.yaml→config_2.yaml`: hunks `14a15` + `17a19,20`). The framework
+  then runs `cell_generator` **once** — a single mechanical command that authors **no**
+  values (it derives the scene/task literals), so it adds no hand-edit and no transform.
+  *Baseline:* 4 hunks across 3 files — `world.sdf` 2 (`25c25` rename `<world name>` +
+  `39a…` insert the `conveyor_3` `<include>`), `scene.yaml` 1 (insert the BOX), `task.yaml`
+  1 (insert the re-grasp pick + place).
+- **Files touched** = `config_2.yaml` only (1) vs `world.sdf` + `scene.yaml` + `task.yaml` (3).
+- **Hand-derived coordinate transforms** = new-lane pose values a human must compute by hand.
+  *Framework:* 0 — the generator derives every frame from the one authored `{x,y,yaw}`.
+  *Baseline:* 2 — the world pose `0.0736 -0.3626 … -3.1036` (`world.sdf:47`) must be
+  hand-transformed into (a) the base_link BOX `{0.7706, 0.2804, …, qz −0.99982, qw 0.0190}`
+  for `scene.yaml:18` (robot-mount subtraction + slab-z + yaw→quaternion) and (b) the
+  base_link grasp target `{0.516875008, 0.188076502, …}` for `task.yaml:16` (mount
+  subtraction + inward-shift + grasp-z) — two independent hand transforms.
+- **Synchronized value-copies** = hand-written pose instances that must agree or the cell
+  silently breaks. *Framework:* 1 — `conveyor_3`'s pose is written once
+  (`config_2.yaml:15`); the re-grasp references `conveyor_2` by `id` (no value copied).
+  *Baseline:* 4 — the new `conveyor_3` pose appears as **3** instances (`world.sdf:47`,
+  `scene.yaml:18`, `task.yaml:16`) **plus** `conveyor_2`'s literal re-stated for the re-grasp
+  pick (`task.yaml:15`, a 4th copy of an existing pose at `task.yaml:11`).
+
+Net: adding one lane costs the framework **2 appends + 1 mechanical generator run, 1 file,
+0 transforms, 1 authored pose**; the rigid baseline costs **4 hand edits across 3 files,
+2 hand-derived transforms, and 4 mutually-consistent pose copies**. The gap is structural,
+not a matter of typing speed — which is exactly why it is reported as operations, not seconds.
 
 ## Files
 - `config_1/{world.sdf, scene.yaml, task.yaml}` — frozen config_1 (the rigid baseline).
