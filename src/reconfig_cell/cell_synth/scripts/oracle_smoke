@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""oracle_smoke — STEP 1 proof: the validity oracle runs HEADLESS (no GL, no Gazebo, no
+controller_manager) and agrees with the known guard verdicts.
+
+    ros2 launch cell_synth synth.launch.py exe:=oracle_smoke
+
+Loads MoveItPy (robot model + kinematics, from launch params only), builds the standalone
+PlanningScene oracle, and checks the two reference configs:
+    config_1        -> expect VALID   (known-good, the framework demo config)
+    config_invalid  -> expect INVALID (conveyor_9 deliberately out of reach, spec §9)
+Exits 0 only if both verdicts match. This is the gate the whole synthesizer stands on.
+"""
+import os
+import sys
+import time
+
+import rclpy
+import yaml
+from ament_index_python.packages import get_package_share_directory
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import synth_core as core  # noqa: E402
+
+from moveit.planning import MoveItPy  # noqa: E402
+
+
+def main():
+    desc = get_package_share_directory("cell_description")
+    cases = [("config_1", True), ("config_invalid", False)]
+
+    rclpy.init()
+    t0 = time.time()
+    moveit = MoveItPy(node_name="cell_synth")
+    oracle = core.Oracle(moveit)
+    boot = time.time() - t0
+    print(f"[smoke] MoveItPy + oracle up HEADLESS in {boot:.1f}s "
+          f"(DISPLAY={os.environ.get('DISPLAY', '<unset>')}, no Gazebo, no controller_manager)")
+    print(f"[smoke] planning frame: {oracle.frame}; collision-gated IK: {oracle.check_collision}")
+
+    ok_all = True
+    for name, expect in cases:
+        with open(os.path.join(desc, f"{name}.yaml")) as f:
+            doc = yaml.safe_load(f)
+        t = time.time()
+        verdict, reason = oracle.is_valid(doc, name)
+        dt = time.time() - t
+        match = (verdict == expect)
+        ok_all &= match
+        print(f"[smoke] {name:<15} valid={verdict!s:<5} expect={expect!s:<5} "
+              f"reason={reason:<32} {dt*1000:6.0f} ms  {'OK' if match else 'MISMATCH'}")
+
+    print(f"[smoke] {'PASS — oracle headless and correct' if ok_all else 'FAIL'}")
+    core.GUARD._exit(0 if ok_all else 1)   # reuse guard's segfault-proof exit
+
+
+if __name__ == "__main__":
+    sys.exit(main())

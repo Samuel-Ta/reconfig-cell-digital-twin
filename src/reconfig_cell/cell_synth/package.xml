@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://relaxng.org/ns/structure/1.0"?>
+<package format="3">
+  <name>cell_synth</name>
+  <version>0.1.0</version>
+  <description>
+    Rung 1 valid-config synthesis on top of the reconfigurable cell. Reuses the existing
+    IK reachability guard (cell_scene_manager) as the validity oracle and the existing
+    generator (cell_generator) as the realizer. Additive only: no robot/gripper/world or
+    schema changes, no optimization.
+  </description>
+  <maintainer email="kodod136@gmail.com">samitade</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>moveit_py</exec_depend>
+  <exec_depend>moveit_msgs</exec_depend>
+  <exec_depend>shape_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <!-- reused (imported, never modified): the IK guard + the generator -->
+  <exec_depend>cell_scene_manager</exec_depend>
+  <exec_depend>cell_generator</exec_depend>
+  <exec_depend>cell_description</exec_depend>
+  <exec_depend>cell_bringup</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
