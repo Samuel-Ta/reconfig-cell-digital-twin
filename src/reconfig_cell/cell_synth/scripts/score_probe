@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""score_probe — diagnose surrogate nondeterminism (Rung 3 gating step, DO FIRST).
+
+    ros2 launch cell_synth synth.launch.py exe:=score_probe
+
+Isolates the source of the Rung-1 surrogate variation:
+  (A) raw set_from_ik from a FIXED seed state, repeated -> is the IK solver itself
+      deterministic given the same seed?
+  (B) raw set_from_ik from RANDOM seed states (the guard's reachable strategy).
+  (C) the Rung-1 surrogate on config_1, scored 10x -> spread.
+  (D) the NEW deterministic surrogate on config_1, scored 10x -> spread (<1% gate).
+Prints everything; no optimization here.
+"""
+import os
+import sys
+import statistics
+
+import rclpy
+import yaml
+from ament_index_python.packages import get_package_share_directory
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import synth_core as core  # noqa: E402
+
+from moveit.planning import MoveItPy  # noqa: E402
+from moveit.core.robot_state import RobotState  # noqa: E402
+
+
+def main():
+    desc = get_package_share_directory("cell_description")
+    with open(os.path.join(desc, "config_1.yaml")) as f:
+        doc = yaml.safe_load(f)
+
+    rclpy.init()
+    moveit = MoveItPy(node_name="cell_synth")
+    oracle = core.Oracle(moveit)
+    model = oracle.model
+
+    # a fixed target pose: config_1 conveyor_1's derived grasp target
+    cell = core.make_cell(doc, "config_1")
+    _, task_spec, _ = core.realize(cell)
+    pose = core._to_pose(task_spec["ops"][0]["target_pose"])
+
+    print("== (A) set_from_ik x10 from FIXED seed UP_SEED ==")
+    sols = []
+    for _ in range(10):
+        st = RobotState(model)
+        st.set_joint_group_positions(core.GUARD.GROUP, list(core.GUARD.UP_SEED))
+        st.update()
+        ok = st.set_from_ik(core.GUARD.GROUP, pose, core.GUARD.TIP, 0.05)
+        sols.append(tuple(round(v, 6) for v in st.get_joint_group_positions(core.GUARD.GROUP)) if ok else None)
+    uniq = set(sols)
+    print(f"   ok={sum(s is not None for s in sols)}/10  distinct solutions={len(uniq)}")
+    for s in list(uniq)[:4]:
+        print(f"     {s}")
+
+    print("== (B) set_from_ik x10 from RANDOM seed states (same pose) ==")
+    import random
+    bsols = []
+    for _ in range(10):
+        st = RobotState(model)
+        st.set_joint_group_positions(core.GUARD.GROUP, [random.uniform(-3.14, 3.14) for _ in range(6)])
+        st.update()
+        ok = st.set_from_ik(core.GUARD.GROUP, pose, core.GUARD.TIP, 0.05)
+        bsols.append(tuple(round(v, 4) for v in st.get_joint_group_positions(core.GUARD.GROUP)) if ok else None)
+    print(f"   ok={sum(s is not None for s in bsols)}/10  distinct={len(set(bsols))} "
+          f"(different seeds -> different branches expected)")
+
+    print("== (C) Rung-1 surrogate on config_1 + synth configs, x10 each ==")
+    sout = os.path.expanduser("~/reconfig_ws/src/reconfig_cell/synth_out")
+    cases = {"config_1": doc}
+    for nm in ("synth_s7_n3_0", "synth_s7_n3_4"):
+        p = os.path.join(sout, nm + ".yaml")
+        if os.path.exists(p):
+            cases[nm] = yaml.safe_load(open(p))
+    for nm, d in cases.items():
+        vals = [oracle.joint_travel_surrogate(d, nm) for _ in range(10)]
+        if all(v is not None for v in vals):
+            sp = (max(vals) - min(vals)) / statistics.mean(vals) * 100
+            print(f"   {nm:<14} spread {sp:6.2f}%  min {min(vals):.4f} max {max(vals):.4f}")
+        else:
+            print(f"   {nm:<14} has None scores: {vals}")
+
+    print("== (D) DETERMINISTIC surrogate x10 each (gate: <1% spread) ==")
+    allpass = True
+    for nm, d in cases.items():
+        vals = [oracle.surrogate_det(d, nm) for _ in range(10)]
+        if all(v is not None for v in vals):
+            sp = (max(vals) - min(vals)) / statistics.mean(vals) * 100
+            ok = sp < 1.0
+            allpass &= ok
+            print(f"   {nm:<14} spread {sp:8.5f}%  mean {statistics.mean(vals):.4f}  "
+                  f"{'PASS' if ok else 'FAIL'}")
+        else:
+            allpass = False
+            print(f"   {nm:<14} None scores: {vals}")
+    print(f"== DETERMINISM GATE: {'PASS — safe to build SA' if allpass else 'FAIL'} ==")
+
+    core.GUARD._exit(0)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

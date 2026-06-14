@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+"""optimize — Rung 3: simulated-annealing cycle-time optimization (headless).
+
+    ros2 launch cell_synth synth.launch.py exe:=optimize n_specs:=5 n_stations:=3 \
+        iters:=400 out_dir:=<dir>
+
+For each of n_specs task specs (one per seed), runs:
+  * SA over (station poses x visit order) minimizing the DETERMINISTIC joint-travel
+    surrogate (oracle-validity-gated; every accepted state stays valid), and
+  * a random-valid BASELINE (Rung-1 sampler) given the same number of scored-valid
+    evaluations — the floor SA must beat.
+Emits the best SA config per spec (drop-in YAML), the SA cost trajectory (convergence),
+and a summary CSV: surrogate cost (init/baseline/SA), % improvement, accepts, wall time.
+NO real-sim here (that is the separate surrogate-vs-real validation). NO CMA-ES.
+"""
+import csv
+import os
+import statistics
+import sys
+import time
+
+import rclpy
+import yaml
+from ament_index_python.packages import get_package_share_directory
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import synth_core as core  # noqa: E402
+
+from moveit.planning import MoveItPy  # noqa: E402
+
+
+def _arg(name, default):
+    pref = f"{name}:="
+    for a in sys.argv[1:]:
+        if a.startswith(pref):
+            return a[len(pref):]
+    return default
+
+
+def random_baseline(oracle, base, seed, n, budget, n_ik):
+    """Best deterministic surrogate found by random-valid sampling under the SAME oracle
+    budget as SA: exactly `budget` evaluations (is_valid calls), each scoring the config if
+    valid. Equal-evaluation-budget is the fair floor SA must beat (SA's `iters` = `budget`)."""
+    prop = core.Proposer(base, seed=seed)
+    best, scored = None, 0
+    for _ in range(budget):
+        doc = prop.sample(n)
+        ok, _ = oracle.is_valid(doc, "base")
+        if not ok:
+            continue
+        c = oracle.surrogate_det(doc, "base", n_ik=n_ik)
+        if c is None:
+            continue
+        scored += 1
+        if best is None or c < best[0]:
+            best = (c, doc)
+    return best, scored, budget
+
+
+def main():
+    sys.stdout.reconfigure(line_buffering=True)   # flush [opt] lines when piped to a file
+    n_specs = int(_arg("n_specs", "5"))
+    base_seed = int(_arg("base_seed", "100"))
+    n_stations = int(_arg("n_stations", "3"))
+    iters = int(_arg("iters", "400"))
+    n_ik = int(_arg("n_ik", "40"))
+    base_config = _arg("base_config", "config_1") or "config_1"
+    out_dir = os.path.abspath(_arg("out_dir", "") or
+                              os.path.expanduser("~/reconfig_ws/src/reconfig_cell/opt_out"))
+    os.makedirs(out_dir, exist_ok=True)
+
+    desc = get_package_share_directory("cell_description")
+    with open(os.path.join(desc, f"{base_config}.yaml")) as f:
+        base_doc = yaml.safe_load(f)
+
+    rclpy.init()
+    moveit = MoveItPy(node_name="cell_synth")
+    oracle = core.Oracle(moveit)
+    print(f"[opt] headless oracle up; n_specs={n_specs} n_stations={n_stations} "
+          f"iters={iters} n_ik={n_ik} out={out_dir}")
+
+    rows = []
+    for k in range(n_specs):
+        seed = base_seed + k
+        t0 = time.time()
+        ann = core.Annealer(oracle, base_doc, seed=seed, n_stations=n_stations,
+                            iters=iters, n_ik=n_ik)
+        res = ann.run()
+        sa_t = time.time() - t0
+        # baseline: random-valid under the SAME oracle-evaluation budget as SA (iters)
+        tb = time.time()
+        bres, bscored, battempts = random_baseline(
+            oracle, base_doc, seed=seed + 9000, n=n_stations, budget=iters, n_ik=n_ik)
+        base_t = time.time() - tb
+        if bres is None:                      # baseline found no valid config in budget
+            bc, bdoc = float("inf"), None
+        else:
+            bc, bdoc = bres
+
+        sa_cost, init_cost = res["best_cost"], res["init_cost"]
+        impr_base = 100 * (bc - sa_cost) / bc if bc else 0.0
+        impr_init = 100 * (init_cost - sa_cost) / init_cost if init_cost else 0.0
+
+        # save best SA config (drop-in) + trajectory
+        best_doc = core.doc_from_state(base_doc, res["best_stations"], res["best_order"])
+        cfg_path = os.path.join(out_dir, f"sa_s{seed}_n{n_stations}.yaml")
+        core.write_config_yaml(best_doc, cfg_path,
+                               f"SA seed={seed} cost={sa_cost:.4f} order={res['best_order']}")
+        with open(os.path.join(out_dir, f"sa_traj_s{seed}_n{n_stations}.csv"), "w", newline="") as f:
+            w = csv.writer(f); w.writerow(["iter", "cost"])
+            w.writerows(enumerate(res["traj"]))
+
+        print(f"[opt] spec seed={seed}: init {init_cost:.3f} -> SA {sa_cost:.3f} "
+              f"(-{impr_init:.1f}%), baseline {bc:.3f}, SA vs base -{impr_base:.1f}%, "
+              f"accepts {res['accepts']}/{iters}, SA {sa_t:.1f}s base {base_t:.1f}s -> {os.path.basename(cfg_path)}")
+        rows.append(dict(seed=seed, n_stations=n_stations, init_cost=round(init_cost, 4),
+                         sa_cost=round(sa_cost, 4), baseline_cost=round(bc, 4),
+                         impr_vs_baseline_pct=round(impr_base, 2),
+                         impr_vs_init_pct=round(impr_init, 2), accepts=res["accepts"],
+                         iters=iters, sa_wall_s=round(sa_t, 2), base_wall_s=round(base_t, 2),
+                         best_order="|".join(res["best_order"]), config=os.path.basename(cfg_path)))
+
+    summary = os.path.join(out_dir, f"opt_summary_n{n_stations}.csv")
+    with open(summary, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        w.writeheader(); w.writerows(rows)
+
+    impr = [r["impr_vs_baseline_pct"] for r in rows]
+    wins = sum(1 for r in rows if r["sa_cost"] < r["baseline_cost"])
+    print("=" * 70)
+    print(f"  RUNG 3 SA vs RANDOM BASELINE — {n_specs} specs, n_stations={n_stations}, iters={iters}")
+    print(f"  SA beats baseline on        : {wins}/{n_specs} specs")
+    print(f"  mean improvement vs baseline: {statistics.mean(impr):.1f}%  "
+          f"(min {min(impr):.1f}%, max {max(impr):.1f}%)")
+    print(f"  mean improvement vs init    : {statistics.mean([r['impr_vs_init_pct'] for r in rows]):.1f}%")
+    print(f"  mean SA wall time           : {statistics.mean([r['sa_wall_s'] for r in rows]):.1f}s/spec")
+    print(f"  summary CSV                 : {summary}")
+    print("=" * 70)
+    core.GUARD._exit(0)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

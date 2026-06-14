@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""valset — build a surrogate-vs-real VALIDATION SET (Rung 3 step 4, headless).
+
+    ros2 launch cell_synth synth.launch.py exe:=valset n_stations:=3 out_dir:=<dir>
+
+Scores a pool of valid configs (the SA winners in opt_out/ + fresh random valids) with the
+DETERMINISTIC surrogate, then picks `n_pick` of them spanning the surrogate range (low ->
+high) so the surrogate-vs-real correlation has real spread. Writes val_*.yaml (drop-ins) +
+valset_surrogate.csv (label, surrogate, source). The real cycle time for each is measured
+separately by synth_trials.launch.py.
+"""
+import glob
+import csv
+import os
+import sys
+
+import rclpy
+import yaml
+from ament_index_python.packages import get_package_share_directory
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import synth_core as core  # noqa: E402
+
+from moveit.planning import MoveItPy  # noqa: E402
+
+
+def _arg(name, default):
+    for a in sys.argv[1:]:
+        if a.startswith(f"{name}:="):
+            return a[len(name) + 2:]
+    return default
+
+
+def main():
+    sys.stdout.reconfigure(line_buffering=True)
+    n_stations = int(_arg("n_stations", "3"))
+    n_pool = int(_arg("n_pool", "50"))
+    n_pick = int(_arg("n_pick", "6"))
+    out_dir = os.path.abspath(_arg("out_dir", "") or
+                              os.path.expanduser("~/reconfig_ws/src/reconfig_cell/val_out"))
+    opt_dir = os.path.expanduser("~/reconfig_ws/src/reconfig_cell/opt_out")
+    os.makedirs(out_dir, exist_ok=True)
+
+    desc = get_package_share_directory("cell_description")
+    base_doc = yaml.safe_load(open(os.path.join(desc, "config_1.yaml")))
+
+    rclpy.init()
+    moveit = MoveItPy(node_name="cell_synth")
+    oracle = core.Oracle(moveit)
+
+    pool = []   # (surrogate, doc, source)
+    # 1) SA winners already on disk (low end of the surrogate range)
+    for p in sorted(glob.glob(os.path.join(opt_dir, f"sa_s*_n{n_stations}.yaml"))):
+        d = yaml.safe_load(open(p))
+        c = oracle.surrogate_det(d, "sa", n_ik=40)
+        ok, _ = oracle.is_valid(d, "sa")
+        if c is not None and ok:
+            pool.append((c, d, os.path.basename(p)))
+    # 2) fresh random valids (mid/high end)
+    prop = core.Proposer(base_doc, seed=777)
+    tries = 0
+    while len([p for p in pool if p[2].startswith("rand")]) < n_pool and tries < n_pool * 80:
+        tries += 1
+        d = prop.sample(n_stations)
+        ok, _ = oracle.is_valid(d, "rand")
+        if not ok:
+            continue
+        c = oracle.surrogate_det(d, "rand", n_ik=40)
+        if c is not None:
+            pool.append((c, d, f"rand{tries}"))
+
+    pool.sort(key=lambda t: t[0])
+    if len(pool) < n_pick:
+        print(f"[valset] only {len(pool)} valid configs; picking all")
+        picks = pool
+    else:  # evenly spaced across the sorted surrogate range
+        idx = [round(i * (len(pool) - 1) / (n_pick - 1)) for i in range(n_pick)]
+        picks = [pool[i] for i in sorted(set(idx))]
+
+    rows = []
+    for i, (c, d, src) in enumerate(picks):
+        name = f"val_{i}_n{n_stations}"
+        path = os.path.join(out_dir, name + ".yaml")
+        core.write_config_yaml(d, path, f"validation config surrogate={c:.4f} source={src}")
+        rows.append(dict(label=name, surrogate=round(c, 4), source=src, config=name + ".yaml"))
+        print(f"[valset] {name}: surrogate {c:.4f}  source {src}")
+
+    with open(os.path.join(out_dir, "valset_surrogate.csv"), "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["label", "surrogate", "source", "config"])
+        w.writeheader(); w.writerows(rows)
+    print(f"[valset] {len(rows)} configs spanning surrogate "
+          f"{rows[0]['surrogate']}..{rows[-1]['surrogate']} -> {out_dir}/valset_surrogate.csv")
+    core.GUARD._exit(0)
+
+
+if __name__ == "__main__":
+    main()

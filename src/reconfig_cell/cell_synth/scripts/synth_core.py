@@ -212,7 +212,9 @@ class Oracle:
                 return False, f"reach:{sid} unreachable or colliding"
         return True, "valid"
 
-    # --- Rung-3 setup only: cheap surrogate, computed + logged, NEVER optimized here ---
+    # --- Rung-1 surrogate (kept for provenance): chains from one seed -> NONDETERMINISTIC
+    # when a chained seed is poor and the IK solver random-restarts. Superseded by
+    # surrogate_det for optimization. ---
     def joint_travel_surrogate(self, doc, name="candidate"):
         """Sum of slowest-joint angular travel across the pick->place target sequence.
         One IK solution per target (UP_SEED start); proxy for trajectory time. Logged only."""
@@ -227,6 +229,52 @@ class Oracle:
             if not st.set_from_ik(GUARD.GROUP, _to_pose(op["target_pose"]), GUARD.TIP, 0.05):
                 return None                      # incomplete -> honestly report TBD
             q = list(st.get_joint_group_positions(GUARD.GROUP))
+            total += max(abs(a - b) for a, b in zip(q, prev))
+            prev = q
+        return total
+
+    # --- DETERMINISTIC surrogate (Rung 3 objective). For each target, pick the
+    # MIN-slowest-joint-travel IK solution over a FIXED seed bank (same seeds every call).
+    # The min over a diverse fixed bank is stable even though a single solve can restart,
+    # because the best branch is reliably found by several seeds -> same score in/out. ---
+    def _canonical_ik(self, pose, seedbank):
+        """The CANONICAL IK solution for a target: the one closest to the elbow-up home
+        UP_SEED over a fixed seed bank. set_from_ik is nondeterministic when it restarts,
+        and picking by travel-from-prev jumps between elbow-up/down branches; anchoring to
+        UP_SEED keeps every target in the SAME (elbow-up) branch the executor uses, so the
+        chosen joint vector is stable to within IK tolerance -> deterministic score."""
+        up = list(GUARD.UP_SEED)
+        best = None
+        for seed in seedbank:
+            st = RobotState(self.model)
+            st.set_joint_group_positions(GUARD.GROUP, seed)
+            st.update()
+            if st.set_from_ik(GUARD.GROUP, pose, GUARD.TIP, 0.05):
+                q = list(st.get_joint_group_positions(GUARD.GROUP))
+                d = sum((a - b) ** 2 for a, b in zip(q, up))     # distance to home branch
+                if best is None or d < best[0]:
+                    best = (d, q)
+        return None if best is None else best[1]
+
+    def _seedbank(self, n_ik, ik_seed):
+        rng = random.Random(ik_seed)             # local RNG -> identical bank every call
+        return [list(GUARD.UP_SEED)] + [
+            [rng.uniform(-math.pi, math.pi) for _ in range(6)] for _ in range(n_ik - 1)]
+
+    def surrogate_det(self, doc, name="candidate", task_spec=None, n_ik=40, ik_seed=20240615):
+        """Deterministic joint-travel surrogate over the FULL ordered pick->place sequence.
+        Sum of slowest-joint travel between consecutive CANONICAL (elbow-up) IK solutions,
+        starting from home. Order-dependent (visit order changes the consecutive pairs).
+        Returns None if any target is unreachable (caller treats as invalid)."""
+        if task_spec is None:
+            _, task_spec, _ = realize(make_cell(doc, name))
+        seedbank = self._seedbank(n_ik, ik_seed)
+        prev = list(GUARD.UP_SEED)
+        total = 0.0
+        for op in task_spec.get("ops", []):
+            q = self._canonical_ik(_to_pose(op["target_pose"]), seedbank)
+            if q is None:
+                return None
             total += max(abs(a - b) for a, b in zip(q, prev))
             prev = q
         return total
@@ -279,6 +327,147 @@ class Proposer:
             "stations": [self._station(i + 1) for i in range(n_stations)],
             "task": self._relay_task(n_stations),
         }
+
+
+# ── visit order <-> task, and SA state helpers ──────────────────────────────────────
+def relay_from_order(order):
+    """Carry-through relay over an ordered station list: pick o0, place o1, pick o1, ..."""
+    ops = [{"op": "pick", "from": order[0]}, {"op": "place", "to": order[1]}]
+    for k in range(2, len(order)):
+        ops += [{"op": "pick", "from": order[k - 1]}, {"op": "place", "to": order[k]}]
+    return ops
+
+
+def doc_from_state(base, stations, order):
+    """Build a schema config doc from SA decision variables (station poses + visit order)."""
+    return {"cell": dict(base["cell"]), "robot_mount": dict(base["robot_mount"]),
+            "belt": dict(base["belt"]), "part": dict(base["part"]),
+            "stations": [{"id": s["id"], "type": "conveyor",
+                          "pose": dict(s["pose"])} for s in stations],
+            "task": relay_from_order(order)}
+
+
+# ── Rung 3: simulated annealing over (station poses x visit order) ───────────────────
+class Annealer:
+    """SA minimizing the deterministic joint-travel surrogate over the mixed decision
+    space: continuous station (x,y,yaw) nudges + discrete visit-order swaps. Reuses the
+    Rung-1 oracle for validity (every accepted state stays valid) and surrogate_det as the
+    objective. Seedable; logs the cost trajectory. NO change to any locked package."""
+
+    def __init__(self, oracle, base_doc, seed, n_stations, iters=400, t0=2.0,
+                 cooling=0.99, step_xy=0.10, step_yaw=0.5, p_cont=0.7, p_jump=0.35,
+                 r_min=0.60, r_max=0.85, n_ik=40, init_tries=12):
+        self.o = oracle
+        self.base = base_doc
+        self.rng = random.Random(seed)
+        self.n = n_stations
+        self.iters, self.t0, self.cooling = iters, t0, cooling
+        self.step_xy, self.step_yaw, self.p_cont = step_xy, step_yaw, p_cont
+        self.p_jump, self.r_min, self.r_max = p_jump, r_min, r_max
+        self.n_ik, self.init_tries = n_ik, init_tries
+        self.hp = dict(iters=iters, t0=t0, cooling=cooling, step_xy=step_xy,
+                       step_yaw=step_yaw, p_cont=p_cont, p_jump=p_jump, n_ik=n_ik,
+                       init_tries=init_tries, seed=seed, n_stations=n_stations)
+
+    def _cost(self, stations, order):
+        """Validity-gated objective: invalid -> None (rejected); valid -> det surrogate."""
+        doc = doc_from_state(self.base, stations, order)
+        ok, _ = self.o.is_valid(doc, "sa")
+        if not ok:
+            return None
+        return self.o.surrogate_det(doc, "sa", n_ik=self.n_ik)
+
+    def _initial(self):
+        """Start from the BEST of `init_tries` random valids (reuse Rung-1 sampler) so SA
+        does not begin (and get cooled) in a poor basin; order = identity."""
+        prop = Proposer(self.base, seed=self.rng.randint(0, 10**9))
+        best = None
+        seen = 0
+        for _ in range(2000):
+            if seen >= self.init_tries and best is not None:
+                break
+            doc = prop.sample(self.n)
+            ok, _ = self.o.is_valid(doc, "sa0")
+            if not ok:
+                continue
+            c = self.o.surrogate_det(doc, "sa0", n_ik=self.n_ik)
+            if c is None:
+                continue
+            seen += 1
+            if best is None or c < best[2]:
+                stations = [{"id": s["id"], "pose": dict(s["pose"])} for s in doc["stations"]]
+                order = [s["id"] for s in doc["stations"]]
+                best = (stations, order, c)
+        if best is None:
+            raise RuntimeError("could not find a valid initial state")
+        return best
+
+    def _resample_pose(self):
+        """Fresh station pose in the UR5 reach annulus (global jump move), belt radial."""
+        u = self.rng.random()
+        r = math.sqrt(self.r_min**2 + u * (self.r_max**2 - self.r_min**2))
+        th = self.rng.uniform(-math.pi, math.pi)
+        bx, by = r * math.cos(th), r * math.sin(th)
+        m = self.base["robot_mount"]
+        return {"x": round(bx + m["x"], 6), "y": round(by + m["y"], 6),
+                "yaw": round(math.atan2(-by, -bx), 6)}
+
+    def _neighbor(self, stations, order, frac):
+        """Propose a neighbor. Move aggressiveness anneals with temperature fraction
+        `frac`=T/T0: EARLY (frac~1) global station 'jumps' + large nudges explore; LATE
+        (frac~0) jumps fade and nudges shrink so SA refines the best basin. Plus discrete
+        visit-order swaps throughout. Explore-early/exploit-late is what lets SA beat the
+        random-valid floor (which has neither refinement nor order-opt)."""
+        stations = [{"id": s["id"], "pose": dict(s["pose"])} for s in stations]
+        order = list(order)
+        if self.n >= 3 and self.rng.random() > self.p_cont:
+            i, j = self.rng.sample(range(self.n), 2)          # discrete: swap visit order
+            order[i], order[j] = order[j], order[i]
+            return stations, order, "swap"
+        s = self.rng.choice(stations)
+        if self.rng.random() < self.p_jump * frac:             # global jump (fades when cool)
+            s["pose"] = self._resample_pose()
+            return stations, order, "jump"
+        scale = 0.25 + 0.75 * frac                             # local nudge shrinks when cool
+        s["pose"]["x"] = round(s["pose"]["x"] + self.rng.gauss(0, self.step_xy * scale), 6)
+        s["pose"]["y"] = round(s["pose"]["y"] + self.rng.gauss(0, self.step_xy * scale), 6)
+        s["pose"]["yaw"] = round(s["pose"]["yaw"] + self.rng.gauss(0, self.step_yaw * scale), 6)
+        return stations, order, "nudge"
+
+    def run(self):
+        stations, order, cost = self._initial()
+        best = (cost, [dict(s) for s in stations], list(order))
+        traj = [cost]
+        T = self.t0
+        accepts = 0
+        stall = 0                                # iters since last improvement to `best`
+        reheats = 0
+        for _ in range(self.iters):
+            ns, no, _ = self._neighbor(stations, order, frac=T / self.t0)
+            nc = self._cost(ns, no)
+            improved = False
+            if nc is not None:
+                d = nc - cost
+                if d < 0 or self.rng.random() < math.exp(-d / max(T, 1e-9)):
+                    stations, order, cost = ns, no, nc
+                    accepts += 1
+                    if nc < best[0] - 1e-9:
+                        best = (nc, [dict(s) for s in stations], list(order))
+                        improved = True
+            stall = 0 if improved else stall + 1
+            if stall >= 45:                       # reheat to escape a stuck basin
+                T = min(self.t0, T * 4.0)
+                stall = 0
+                reheats += 1
+                # restart from the best-so-far when reheating (focus exploration there)
+                cost = best[0]
+                stations = [dict(s) for s in best[1]]
+                order = list(best[2])
+            else:
+                T *= self.cooling
+            traj.append(cost)
+        return dict(best_cost=best[0], best_stations=best[1], best_order=best[2],
+                    init_cost=traj[0], traj=traj, accepts=accepts, reheats=reheats, hp=self.hp)
 
 
 # ── emit a synthesized config in the existing schema (drop-in to the generator) ──────

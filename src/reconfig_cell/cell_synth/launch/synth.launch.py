@@ -45,9 +45,10 @@ def launch_setup(context, *args, **kwargs):
     shim = os.path.join(os.path.expanduser("~"), "reconfig_ws", "fastcdr_compat.so")
     env = {"LD_PRELOAD": shim} if os.path.exists(shim) else {}
 
-    # forward the synthesizer's CLI args (only meaningful for exe:=synthesize)
+    # forward CLI args for synthesize (k/seed/max_attempts) and optimize (n_specs/base_seed/iters/n_ik)
     fwd = [f"{n}:={LaunchConfiguration(n).perform(context)}"
-           for n in ("k", "n_stations", "seed", "max_attempts", "base_config", "out_dir")]
+           for n in ("k", "n_stations", "seed", "max_attempts", "base_config", "out_dir",
+                     "n_specs", "base_seed", "iters", "n_ik")]
 
     node = Node(package="cell_synth", executable=exe, name="cell_synth", output="screen",
                 additional_env=env, arguments=fwd,
@@ -69,5 +70,9 @@ def generate_launch_description():
         DeclareLaunchArgument("max_attempts", default_value="300"),
         DeclareLaunchArgument("base_config", default_value="config_1"),
         DeclareLaunchArgument("out_dir", default_value=""),
+        DeclareLaunchArgument("n_specs", default_value="5"),
+        DeclareLaunchArgument("base_seed", default_value="100"),
+        DeclareLaunchArgument("iters", default_value="400"),
+        DeclareLaunchArgument("n_ik", default_value="40"),
         OpaqueFunction(function=launch_setup),
     ])
