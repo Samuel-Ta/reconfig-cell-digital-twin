@@ -1,0 +1,9 @@
+# Snapshot of the manual arrangement placed in the Gazebo GUI (world frame).
+# Robot base (UR5) is at (-0.697, -0.643, 0.40); UR5 reach ~0.85 m.
+saved_from: user manual arrangement (gz GUI)
+robot_base: {x: -0.697, y: -0.643, z: 0.40}
+conveyors:
+  - {id: conveyor_1, x: -1.2912, y: 0.9433, yaw: -0.0256}
+  - {id: conveyor_2, x:  0.3769, y: 0.8867, yaw: -0.0055}
+  - {id: conveyor_3, x: -0.4357, y: 1.6867, yaw: -1.6125}
+cube_1: {x: -0.4075, y: 1.4494, z: 0.7313}

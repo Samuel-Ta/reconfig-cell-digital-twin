@@ -36,10 +36,28 @@ ALL_CONVEYORS = (1, 2, 3, 4, 5)
 CONVEYOR_URI = "https://fuel.gazebosim.org/1.0/Open-RMF/models/DeliveryRobotWithConveyor"
 
 
-def _conveyor_sdf(name, x, y, yaw):
+def _conveyor_sdf(name):
+    # NOTE: pose is applied by `create` via -x/-y/-z/-Y flags, NOT here. ros_gz_sim create
+    # IGNORES a <pose> embedded in -string SDF, which silently spawned everything at the
+    # world origin (0,0,0) — the cause of the cube falling through to the floor.
     return (f"<?xml version='1.0'?><sdf version='1.8'>"
             f"<include><uri>{CONVEYOR_URI}</uri><name>{name}</name>"
-            f"<pose>{x} {y} 0.0 0 0 {yaw}</pose><static>true</static></include></sdf>")
+            f"<static>true</static></include></sdf>")
+
+
+BELT_THK = 0.10
+
+
+def _belt_slab_sdf(name):
+    """A STATIC belt slab matching the MoveIt belt box in scene.yaml (full 1.0x0.5 footprint).
+    Pose applied by `create` flags (see _conveyor_sdf note). The cube's grasp point is 0.27 m
+    inward from the station centre, well within this 1.0x0.5 slab, so it lands ON the belt."""
+    return (f"<?xml version='1.0'?><sdf version='1.8'><model name='{name}'><static>true</static>"
+            f"<link name='l'>"
+            f"<collision name='c'><geometry><box><size>1.0 0.5 {BELT_THK}</size></box></geometry></collision>"
+            f"<visual name='v'><geometry><box><size>1.0 0.5 {BELT_THK}</size></box></geometry>"
+            f"<material><ambient>0.30 0.30 0.34 1</ambient><diffuse>0.35 0.35 0.4 1</diffuse></material>"
+            f"</visual></link></model></sdf>")
 
 
 def launch_setup(context, *args, **kwargs):
@@ -106,9 +124,18 @@ def launch_setup(context, *args, **kwargs):
         launch_arguments={"gz_args": IfElseSubstitution(
             gazebo_gui, if_value=[" -r -v 4 ", world_path],
             else_value=[" -s -r -v 4 ", world_path])}.items())
+    # spawn the robot at the config's robot_mount (so the cell can be relocated; the
+    # generated grasp targets are derived relative to this same mount)
+    mx, my, mz = str(mount["x"]), str(mount["y"]), str(mount["z"])
     spawn_robot = Node(package="ros_gz_sim", executable="create", output="screen",
                        arguments=["-string", robot_description_content, "-name", "ur5_rg2",
-                                  "-x", CELL_X, "-y", CELL_Y, "-z", "0.40", "-allow_renaming", "true"])
+                                  "-x", mx, "-y", my, "-z", mz, "-allow_renaming", "true"])
+    # move the (free, static) pedestal under the relocated robot base
+    move_pedestal = ExecuteProcess(
+        cmd=["gz", "service", "-s", "/world/default/set_pose",
+             "--reqtype", "gz.msgs.Pose", "--reptype", "gz.msgs.Boolean", "--timeout", "3000",
+             "--req", f'name: "robot_pedestal", position: {{x: {mx}, y: {my}, z: {float(mz)/2}}}'],
+        output="screen")
     clock_bridge = Node(package="ros_gz_bridge", executable="parameter_bridge",
                         arguments=["/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock"], output="screen")
 
@@ -116,10 +143,18 @@ def launch_setup(context, *args, **kwargs):
         cmd=["ros2", "run", "ros_gz_sim", "remove", "--ros-args",
              "-p", f"entity_name:=delivery_conveyor_{n}"], output="screen")
         for n in ALL_CONVEYORS]
+    top_z = doc["belt"]["top_z"]
+    # pose is passed as -x/-y/-z/-Y FLAGS (create ignores <pose> in -string SDF)
     spawn_conveyors = [Node(package="ros_gz_sim", executable="create", output="screen",
-                            arguments=["-string", _conveyor_sdf(s["id"], s["pose"]["x"],
-                                                                s["pose"]["y"], s["pose"]["yaw"])])
+                            arguments=["-string", _conveyor_sdf(s["id"]),
+                                       "-x", str(s["pose"]["x"]), "-y", str(s["pose"]["y"]),
+                                       "-z", "0.0", "-Y", str(s["pose"]["yaw"])])
                        for s in stations]
+    spawn_pads = [Node(package="ros_gz_sim", executable="create", output="screen",
+                       arguments=["-string", _belt_slab_sdf(f"{s['id']}_belt"),
+                                  "-x", str(s["pose"]["x"]), "-y", str(s["pose"]["y"]),
+                                  "-z", str(top_z - BELT_THK / 2), "-Y", str(s["pose"]["yaw"])])
+                  for s in stations]
 
     jsb = Node(package="controller_manager", executable="spawner",
                arguments=["joint_state_broadcaster", "--controller-manager", "/controller_manager"],
@@ -147,8 +182,8 @@ def launch_setup(context, *args, **kwargs):
     delayed_spawn = TimerAction(period=5.0, actions=[spawn_robot])
     after_robot = RegisterEventHandler(OnProcessExit(
         target_action=spawn_robot,
-        on_exit=[TimerAction(period=2.0, actions=[jsb] + remove_actions),
-                 TimerAction(period=4.0, actions=spawn_conveyors)]))
+        on_exit=[TimerAction(period=2.0, actions=[jsb] + remove_actions + [move_pedestal]),
+                 TimerAction(period=4.0, actions=spawn_conveyors + spawn_pads)]))
     after_jsb = RegisterEventHandler(OnProcessExit(target_action=jsb, on_exit=[arm]))
     after_arm = RegisterEventHandler(OnProcessExit(
         target_action=arm, on_exit=[move_group, TimerAction(period=8.0, actions=[scene_manager])]))

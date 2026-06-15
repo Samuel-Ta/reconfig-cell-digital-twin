@@ -1,0 +1,7 @@
+label,surrogate,source,config
+val_0_n3,3.0759,sa_s200_n3.yaml,val_0_n3.yaml
+val_1_n3,5.1359,rand285,val_1_n3.yaml
+val_2_n3,5.7835,rand16,val_2_n3.yaml
+val_3_n3,6.8605,rand54,val_3_n3.yaml
+val_4_n3,8.1763,rand91,val_4_n3.yaml
+val_5_n3,11.2871,rand232,val_5_n3.yaml

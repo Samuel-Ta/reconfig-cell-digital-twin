@@ -41,10 +41,24 @@ CONVEYOR_URI = "https://fuel.gazebosim.org/1.0/Open-RMF/models/DeliveryRobotWith
 
 
 def _conveyor_sdf(name, x, y, yaw):
-    """One relocated conveyor — same Fuel include + <static> as cell_arranged.world uses."""
+    """One relocated conveyor (pose applied by create -x/-y/-z/-Y flags, NOT embedded in
+    -string SDF — create ignores an embedded <pose>, which spawns everything at the origin)."""
     return (f"<?xml version='1.0'?><sdf version='1.8'>"
             f"<include><uri>{CONVEYOR_URI}</uri><name>{name}</name>"
-            f"<pose>{x} {y} 0.0 0 0 {yaw}</pose><static>true</static></include></sdf>")
+            f"<static>true</static></include></sdf>")
+
+
+BELT_THK = 0.10
+
+
+def _belt_slab_sdf(name):
+    """Static belt slab (1.0x0.5 footprint) matching scene.yaml; pose via create flags."""
+    return (f"<?xml version='1.0'?><sdf version='1.8'><model name='{name}'><static>true</static>"
+            f"<link name='l'>"
+            f"<collision name='c'><geometry><box><size>1.0 0.5 {BELT_THK}</size></box></geometry></collision>"
+            f"<visual name='v'><geometry><box><size>1.0 0.5 {BELT_THK}</size></box></geometry>"
+            f"<material><ambient>0.30 0.30 0.34 1</ambient><diffuse>0.35 0.35 0.4 1</diffuse></material>"
+            f"</visual></link></model></sdf>")
 
 
 def launch_setup(context, *args, **kwargs):
@@ -62,7 +76,8 @@ def launch_setup(context, *args, **kwargs):
             raise RuntimeError(f"missing artifact: {f}")
 
     with open(cfg_yaml) as fh:
-        stations = yaml.safe_load(fh)["stations"]
+        doc = yaml.safe_load(fh)
+    stations = doc["stations"]
 
     robot_description_content = Command([
         FindExecutable(name="xacro"), " ", xacro_file,
@@ -117,10 +132,17 @@ def launch_setup(context, *args, **kwargs):
         cmd=["ros2", "run", "ros_gz_sim", "remove", "--ros-args",
              "-p", f"entity_name:=delivery_conveyor_{n}"], output="screen")
         for n in ALL_CONVEYORS]
+    top_z = doc["belt"]["top_z"]
     spawn_conveyors = [Node(package="ros_gz_sim", executable="create", output="screen",
-                            arguments=["-string", _conveyor_sdf(s["id"], s["pose"]["x"],
-                                                                s["pose"]["y"], s["pose"]["yaw"])])
+                            arguments=["-string", _conveyor_sdf(s["id"]),
+                                       "-x", str(s["pose"]["x"]), "-y", str(s["pose"]["y"]),
+                                       "-z", "0.0", "-Y", str(s["pose"]["yaw"])])
                        for s in stations]
+    spawn_pads = [Node(package="ros_gz_sim", executable="create", output="screen",
+                       arguments=["-string", _belt_slab_sdf(f"{s['id']}_belt"),
+                                  "-x", str(s["pose"]["x"]), "-y", str(s["pose"]["y"]),
+                                  "-z", str(top_z - BELT_THK / 2), "-Y", str(s["pose"]["yaw"])])
+                  for s in stations]
 
     jsb = Node(package="controller_manager", executable="spawner",
                arguments=["joint_state_broadcaster", "--controller-manager", "/controller_manager"],
@@ -145,7 +167,7 @@ def launch_setup(context, *args, **kwargs):
     after_robot = RegisterEventHandler(OnProcessExit(
         target_action=spawn_robot,
         on_exit=[TimerAction(period=2.0, actions=[jsb] + remove_actions),
-                 TimerAction(period=4.0, actions=spawn_conveyors)]))
+                 TimerAction(period=4.0, actions=spawn_conveyors + spawn_pads)]))
     after_jsb = RegisterEventHandler(OnProcessExit(target_action=jsb, on_exit=[arm]))
     after_arm = RegisterEventHandler(OnProcessExit(
         target_action=arm, on_exit=[move_group, TimerAction(period=8.0, actions=[scene_manager])]))

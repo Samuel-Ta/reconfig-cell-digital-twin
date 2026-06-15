@@ -5,11 +5,11 @@
 # existing trial_runner). Produces val_out/pairs.csv (label,surrogate,real_cycle,std,n).
 #
 #   ./run_valset_trials.sh [trials_per_config]   (default 3)
-set -u
 WS=$HOME/reconfig_ws
 VAL=$WS/src/reconfig_cell/val_out
 GEN=$VAL/generated
 TRIALS=${1:-3}
+# ROS setup scripts reference unset vars; source them WITHOUT `set -u`
 source /opt/ros/jazzy/setup.bash 2>/dev/null
 source $WS/install/setup.bash 2>/dev/null
 

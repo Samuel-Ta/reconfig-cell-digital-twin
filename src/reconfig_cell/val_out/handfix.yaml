@@ -1,0 +1,15 @@
+# Hand-fixed cell: robot relocated onto the pedestal the user placed, conveyors + box
+# kept exactly where the user arranged them. Robot among the conveyors -> all reachable.
+cell: {robot: ur5_rg2, base_frame: base_link}
+robot_mount: {x: -0.4414, y: 0.9671, z: 0.40}
+belt: {top_z: 0.70, inward: 0.27}
+part: {name: cube_1, geometry: {type: box, size: [0.04, 0.04, 0.04]}}
+stations:
+  - {id: conveyor_1, type: conveyor, pose: {x: -1.2912, y: 0.9433, yaw: -0.0256}}
+  - {id: conveyor_2, type: conveyor, pose: {x:  0.3769, y: 0.8867, yaw: -0.0055}}
+  - {id: conveyor_3, type: conveyor, pose: {x: -0.4357, y: 1.6867, yaw: -1.6125}}
+task:
+  - {op: pick,  from: conveyor_3}
+  - {op: place, to:   conveyor_1}
+  - {op: pick,  from: conveyor_1}
+  - {op: place, to:   conveyor_2}
