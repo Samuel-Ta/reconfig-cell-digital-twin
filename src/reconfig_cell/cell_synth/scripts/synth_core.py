@@ -290,7 +290,7 @@ class Proposer:
 
     def __init__(self, base_doc, seed, r_min=0.60, r_max=0.85,
                  th_lo=-math.pi, th_hi=math.pi, yaw_radial=True,
-                 even_spread=True, jitter_deg=22.0):
+                 even_spread=False, jitter_deg=22.0):
         self.base = base_doc
         self.seed = seed
         self.rng = random.Random(seed)
@@ -487,11 +487,15 @@ class Annealer:
                     init_cost=traj[0], traj=traj, accepts=accepts, reheats=reheats, hp=self.hp)
 
 
-# ── synthesis QUALITY filter (aesthetic, on top of is_valid) ─────────────────────────
+# ── synthesis QUALITY constraints (on top of is_valid) ───────────────────────────────
 # Applied during synthesis only (NOT in the core is_valid oracle, so the hand-authored
-# reference configs still validate). Makes synthesized cells look deliberate: real gaps
-# between conveyors, balanced spread around the robot, belts cleanly facing the arm.
-def layout_quality(doc, name="cand", min_gap=0.18, min_ang_deg=50.0, face_tol_deg=8.0):
+# reference configs still validate). TWO hard constraints, both layout-assumption-free:
+#   (1) a real CLEARANCE gap between conveyors (not just non-touching), and
+#   (3) each belt cleanly FACES the robot (no tilt).
+# NOTE: there is deliberately NO minimum angular-separation / even-spread constraint — the
+# optimizer must be free to place stations anywhere valid, including clustered on one side,
+# so the cycle-time optimum is found without imposing a layout shape.
+def layout_quality(doc, name="cand", min_gap=0.18, face_tol_deg=8.0):
     cell = make_cell(doc, name)
     m = cell["robot_mount"]
     sts = cell["stations"]
@@ -503,13 +507,6 @@ def layout_quality(doc, name="cand", min_gap=0.18, min_ang_deg=50.0, face_tol_de
         for j in range(i + 1, len(foot)):
             if _obb_overlap(foot[i], foot[j]):
                 return False, "gap"
-    # (2) EVEN SPREAD: every angular gap around the robot >= min_ang_deg (no clustering).
-    angs = sorted(math.atan2(s["pose"]["y"] - m["y"], s["pose"]["x"] - m["x"]) for s in sts)
-    n = len(angs)
-    sep = math.radians(min_ang_deg)
-    for i in range(n):
-        if ((angs[(i + 1) % n] - angs[i]) % (2 * math.pi)) < sep:
-            return False, "spread"
     # (3) CLEAN ORIENTATION: each belt's yaw faces the robot (radial), within tolerance.
     tol = math.radians(face_tol_deg)
     for s in sts:

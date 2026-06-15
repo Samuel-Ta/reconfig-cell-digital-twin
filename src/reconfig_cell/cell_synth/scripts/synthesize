@@ -44,7 +44,6 @@ def main():
     max_attempts = int(_arg("max_attempts", "800"))
     quality = _arg("quality", "1") not in ("0", "off", "false")
     min_gap = float(_arg("min_gap", "0.18"))
-    min_ang = float(_arg("min_ang", "50"))
     base_config = _arg("base_config", "config_1") or "config_1"
     out_dir = _arg("out_dir", "") or os.path.join(os.path.expanduser("~"), "reconfig_ws",
                                                   "src", "reconfig_cell", "synth_out")
@@ -86,9 +85,8 @@ def main():
             valid, reason = oracle.is_valid(doc, f"synth_{seed}_{i}")
             if not valid:
                 continue
-            if quality:                              # aesthetic filter (gaps/spread/facing)
-                ok_q, reason = core.layout_quality(doc, f"synth_{seed}_{i}",
-                                                   min_gap=min_gap, min_ang_deg=min_ang)
+            if quality:                              # quality constraints (gap + facing)
+                ok_q, reason = core.layout_quality(doc, f"synth_{seed}_{i}", min_gap=min_gap)
                 if not ok_q:
                     continue
             accepted = doc
