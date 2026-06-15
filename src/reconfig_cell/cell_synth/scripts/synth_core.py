@@ -112,12 +112,14 @@ def realize(cell):
 
 
 # ── the validity oracle ──────────────────────────────────────────────────────────────
-# Physical conveyor chassis footprint used for station-station NON-OVERLAP. This is
-# deliberately SMALLER than the generator's 1.0x0.5 MoveIt grasp slab (GEN.BELT_BOX_*):
-# the slab is a conservative planning obstacle and adjacent valid conveyors' slabs legally
-# overlap (verified on config_1/config_2), so the slab is the wrong gauge for "two physical
-# conveyors interpenetrate". 0.8x0.4 is the conveyor body; both reference configs pass it.
-PHYS_FOOT_LEN, PHYS_FOOT_WID = 0.80, 0.40
+# Physical conveyor footprint for station-station NON-OVERLAP, taken from the actual
+# DeliveryRobotWithConveyor collision (two 0.53x0.51 belt boxes at x=+/-0.2 -> ~0.93x0.51).
+# Calibrated against the real cell: at this size both reference configs (config_1/config_2,
+# ~0.92 m apart at 90 deg) pass, while tightly-packed synthesized layouts (e.g. conveyors
+# 0.44 m apart and parallel) are correctly rejected as physically stacking. The earlier
+# 0.8x0.4 was too small (let conveyors stack); 1.0x0.5 (the MoveIt grasp slab) too big
+# (rejected the valid references).
+PHYS_FOOT_LEN, PHYS_FOOT_WID = 0.93, 0.51
 
 DEFAULTS = dict(
     arena_half=1.20,        # world half-extent (m) around the robot mount, per axis
