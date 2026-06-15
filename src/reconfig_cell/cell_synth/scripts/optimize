@@ -48,6 +48,9 @@ def random_baseline(oracle, base, seed, n, budget, n_ik):
         ok, _ = oracle.is_valid(doc, "base")
         if not ok:
             continue
+        ok_q, _ = core.layout_quality(doc, "base")     # same final constraint set as SA
+        if not ok_q:
+            continue
         c = oracle.surrogate_det(doc, "base", n_ik=n_ik)
         if c is None:
             continue
@@ -87,10 +90,12 @@ def main():
                             iters=iters, n_ik=n_ik)
         res = ann.run()
         sa_t = time.time() - t0
-        # baseline: random-valid under the SAME oracle-evaluation budget as SA (iters)
+        # baseline: random-valid under the SAME total oracle-evaluation budget as SA
+        # (SA spends most evals just FINDING valid states at this sparse hit-rate, so an
+        # iters-only budget would be an unfairly thin floor)
         tb = time.time()
         bres, bscored, battempts = random_baseline(
-            oracle, base_doc, seed=seed + 9000, n=n_stations, budget=iters, n_ik=n_ik)
+            oracle, base_doc, seed=seed + 9000, n=n_stations, budget=res["evals"], n_ik=n_ik)
         base_t = time.time() - tb
         if bres is None:                      # baseline found no valid config in budget
             bc, bdoc = float("inf"), None

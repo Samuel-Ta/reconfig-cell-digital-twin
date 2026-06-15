@@ -376,7 +376,9 @@ class Annealer:
                  r_min=0.60, r_max=0.85, n_ik=40, init_tries=12):
         self.o = oracle
         self.base = base_doc
+        self.mount = base_doc["robot_mount"]
         self.rng = random.Random(seed)
+        self.evals = 0                  # candidate configs evaluated (for fair baseline budget)
         self.n = n_stations
         self.iters, self.t0, self.cooling = iters, t0, cooling
         self.step_xy, self.step_yaw, self.p_cont = step_xy, step_yaw, p_cont
@@ -387,10 +389,15 @@ class Annealer:
                        init_tries=init_tries, seed=seed, n_stations=n_stations)
 
     def _cost(self, stations, order):
-        """Validity-gated objective: invalid -> None (rejected); valid -> det surrogate."""
+        """Validity-gated objective over the FINAL constraint set (is_valid oracle = reach +
+        non-overlap + bounds, PLUS the quality constraints gap + facing). Invalid -> None
+        (rejected); valid -> deterministic surrogate. No even-spread / layout assumption."""
         doc = doc_from_state(self.base, stations, order)
         ok, _ = self.o.is_valid(doc, "sa")
         if not ok:
+            return None
+        ok_q, _ = layout_quality(doc, "sa")
+        if not ok_q:
             return None
         return self.o.surrogate_det(doc, "sa", n_ik=self.n_ik)
 
@@ -400,12 +407,16 @@ class Annealer:
         prop = Proposer(self.base, seed=self.rng.randint(0, 10**9))
         best = None
         seen = 0
-        for _ in range(2000):
+        for _ in range(20000):          # high cap: the gap constraint makes valids rare
             if seen >= self.init_tries and best is not None:
                 break
+            self.evals += 1
             doc = prop.sample(self.n)
             ok, _ = self.o.is_valid(doc, "sa0")
             if not ok:
+                continue
+            ok_q, _ = layout_quality(doc, "sa0")
+            if not ok_q:
                 continue
             c = self.o.surrogate_det(doc, "sa0", n_ik=self.n_ik)
             if c is None:
@@ -448,7 +459,10 @@ class Annealer:
         scale = 0.25 + 0.75 * frac                             # local nudge shrinks when cool
         s["pose"]["x"] = round(s["pose"]["x"] + self.rng.gauss(0, self.step_xy * scale), 6)
         s["pose"]["y"] = round(s["pose"]["y"] + self.rng.gauss(0, self.step_xy * scale), 6)
-        s["pose"]["yaw"] = round(s["pose"]["yaw"] + self.rng.gauss(0, self.step_yaw * scale), 6)
+        # keep the belt FACING the robot after moving (radial yaw) so the facing constraint
+        # holds by construction; yaw is not an independent cycle-time DOF (target is radial)
+        bx, by = s["pose"]["x"] - self.mount["x"], s["pose"]["y"] - self.mount["y"]
+        s["pose"]["yaw"] = round(math.atan2(-by, -bx), 6)
         return stations, order, "nudge"
 
     def run(self):
@@ -461,6 +475,7 @@ class Annealer:
         reheats = 0
         for _ in range(self.iters):
             ns, no, _ = self._neighbor(stations, order, frac=T / self.t0)
+            self.evals += 1
             nc = self._cost(ns, no)
             improved = False
             if nc is not None:
@@ -484,7 +499,8 @@ class Annealer:
                 T *= self.cooling
             traj.append(cost)
         return dict(best_cost=best[0], best_stations=best[1], best_order=best[2],
-                    init_cost=traj[0], traj=traj, accepts=accepts, reheats=reheats, hp=self.hp)
+                    init_cost=traj[0], traj=traj, accepts=accepts, reheats=reheats,
+                    evals=self.evals, hp=self.hp)
 
 
 # ── synthesis QUALITY constraints (on top of is_valid) ───────────────────────────────
