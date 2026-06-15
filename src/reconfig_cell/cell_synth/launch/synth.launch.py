@@ -48,7 +48,8 @@ def launch_setup(context, *args, **kwargs):
     # forward CLI args for synthesize (k/seed/max_attempts) and optimize (n_specs/base_seed/iters/n_ik)
     fwd = [f"{n}:={LaunchConfiguration(n).perform(context)}"
            for n in ("k", "n_stations", "seed", "max_attempts", "base_config", "out_dir",
-                     "n_specs", "base_seed", "iters", "n_ik")]
+                     "n_specs", "base_seed", "iters", "n_ik",
+                     "quality", "min_gap", "min_ang")]
 
     node = Node(package="cell_synth", executable=exe, name="cell_synth", output="screen",
                 additional_env=env, arguments=fwd,
@@ -74,5 +75,8 @@ def generate_launch_description():
         DeclareLaunchArgument("base_seed", default_value="100"),
         DeclareLaunchArgument("iters", default_value="400"),
         DeclareLaunchArgument("n_ik", default_value="40"),
+        DeclareLaunchArgument("quality", default_value="1"),
+        DeclareLaunchArgument("min_gap", default_value="0.18"),
+        DeclareLaunchArgument("min_ang", default_value="50"),
         OpaqueFunction(function=launch_setup),
     ])

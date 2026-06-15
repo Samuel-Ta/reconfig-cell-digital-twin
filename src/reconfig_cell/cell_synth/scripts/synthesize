@@ -41,15 +41,26 @@ def main():
     k = int(_arg("k", "5"))
     n_stations = int(_arg("n_stations", "3"))
     seed = int(_arg("seed", "1"))
-    max_attempts = int(_arg("max_attempts", "300"))
+    max_attempts = int(_arg("max_attempts", "800"))
+    quality = _arg("quality", "1") not in ("0", "off", "false")
+    min_gap = float(_arg("min_gap", "0.18"))
+    min_ang = float(_arg("min_ang", "50"))
     base_config = _arg("base_config", "config_1") or "config_1"
     out_dir = _arg("out_dir", "") or os.path.join(os.path.expanduser("~"), "reconfig_ws",
                                                   "src", "reconfig_cell", "synth_out")
     out_dir = os.path.abspath(out_dir)
     os.makedirs(out_dir, exist_ok=True)
 
-    desc = get_package_share_directory("cell_description")
-    with open(os.path.join(desc, f"{base_config}.yaml")) as f:
+    # base_config may be a NAME in cell_description, or a direct path to a base YAML
+    # (use a path to synthesize around a custom robot_mount, e.g. a hand-placed robot)
+    if os.path.isfile(base_config):
+        base_path = base_config
+    elif os.path.isfile(base_config + ".yaml"):
+        base_path = base_config + ".yaml"
+    else:
+        base_path = os.path.join(get_package_share_directory("cell_description"),
+                                 f"{base_config}.yaml")
+    with open(base_path) as f:
         base_doc = yaml.safe_load(f)
 
     rclpy.init()
@@ -73,9 +84,15 @@ def main():
             total_attempts += 1
             doc = proposer.sample(n_stations)
             valid, reason = oracle.is_valid(doc, f"synth_{seed}_{i}")
-            if valid:
-                accepted = doc
-                break
+            if not valid:
+                continue
+            if quality:                              # aesthetic filter (gaps/spread/facing)
+                ok_q, reason = core.layout_quality(doc, f"synth_{seed}_{i}",
+                                                   min_gap=min_gap, min_ang_deg=min_ang)
+                if not ok_q:
+                    continue
+            accepted = doc
+            break
         dt = time.time() - t
         if accepted is None:
             print(f"[synth] config {i}: NO valid config in {attempts} attempts "

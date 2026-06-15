@@ -1,0 +1,16 @@
+# SYNTHESIZED by cell_synth (Rung 1). seed=7 idx=1 attempts=17 n_stations=3 base=/home/samitade/reconfig_ws/src/reconfig_cell/val_out/handbase.yaml surrogate=5.856210634380515
+# Drop-in to cell_generator in the LOCKED schema; robot_mount/belt/part are
+# copied unchanged from the base config (robot/gripper/world are not touched).
+cell: {robot: ur5_rg2, base_frame: base_link}
+robot_mount: {x: -0.4414, y: 0.9671, z: 0.4}
+belt: {top_z: 0.7, inward: 0.27}
+part: {name: cube_1, geometry: {type: box, size: [0.04, 0.04, 0.04]}}
+stations:
+  - {id: conveyor_1, type: conveyor, pose: {x: -1.181083, y: 1.359365, yaw: -0.487605}}
+  - {id: conveyor_2, type: conveyor, pose: {x: -0.518321, y: 0.22334, yaw: 1.467741}}
+  - {id: conveyor_3, type: conveyor, pose: {x: 0.191771, y: 1.436077, yaw: -2.504083}}
+task:
+  - {op: pick,  from: conveyor_1}
+  - {op: place, to:   conveyor_2}
+  - {op: pick,  from: conveyor_2}
+  - {op: place, to:   conveyor_3}

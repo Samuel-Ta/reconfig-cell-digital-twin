@@ -1,0 +1,10 @@
+# Base for synthesis with the robot at the position the user fixed by hand.
+# The synthesizer fills stations/task; it places conveyors reachably AROUND this mount.
+cell: {robot: ur5_rg2, base_frame: base_link}
+robot_mount: {x: -0.4414, y: 0.9671, z: 0.40}
+belt: {top_z: 0.70, inward: 0.27}
+part: {name: cube_1, geometry: {type: box, size: [0.04, 0.04, 0.04]}}
+stations:
+  - {id: conveyor_1, type: conveyor, pose: {x: -1.0, y: 0.9671, yaw: 0.0}}
+task:
+  - {op: pick, from: conveyor_1}

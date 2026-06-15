@@ -289,26 +289,36 @@ class Proposer:
     UR5 reach envelope -> high valid-hit rate (NOT uniform over the arena)."""
 
     def __init__(self, base_doc, seed, r_min=0.60, r_max=0.85,
-                 th_lo=-math.pi, th_hi=math.pi, yaw_radial=True):
+                 th_lo=-math.pi, th_hi=math.pi, yaw_radial=True,
+                 even_spread=True, jitter_deg=22.0):
         self.base = base_doc
         self.seed = seed
         self.rng = random.Random(seed)
         self.r_min, self.r_max = float(r_min), float(r_max)
         self.th_lo, self.th_hi = float(th_lo), float(th_hi)
         self.yaw_radial = yaw_radial
+        self.even_spread = even_spread          # place stations on evenly-spaced angular slots
+        self.jitter = math.radians(jitter_deg)  # +/- wobble on each slot
         self.mount = base_doc["robot_mount"]
 
-    def _station(self, idx):
+    def _station(self, idx, theta=None):
         # sqrt-uniform radius for area-uniform sampling within the annulus
         u = self.rng.random()
         r = math.sqrt(self.r_min**2 + u * (self.r_max**2 - self.r_min**2))
-        th = self.rng.uniform(self.th_lo, self.th_hi)
+        th = self.rng.uniform(self.th_lo, self.th_hi) if theta is None else theta
         bx, by = r * math.cos(th), r * math.sin(th)              # base frame
         wx, wy = bx + self.mount["x"], by + self.mount["y"]      # world frame
         # belt facing the robot (radial) by default, else random orientation
         yaw = math.atan2(-by, -bx) if self.yaw_radial else self.rng.uniform(-math.pi, math.pi)
         return {"id": f"conveyor_{idx}", "type": "conveyor",
                 "pose": {"x": round(wx, 6), "y": round(wy, 6), "yaw": round(yaw, 6)}}
+
+    def _slot_angles(self, n):
+        """Evenly-spaced angular slots (360/n apart) with a random global offset + per-slot
+        jitter -> layouts come out balanced by construction (high quality-hit rate)."""
+        base = self.rng.uniform(-math.pi, math.pi)
+        return [base + i * (2 * math.pi / n) + self.rng.uniform(-self.jitter, self.jitter)
+                for i in range(n)]
 
     @staticmethod
     def _relay_task(n):
@@ -321,12 +331,17 @@ class Proposer:
 
     def sample(self, n_stations):
         """Draw one full candidate config doc in the locked schema."""
+        if self.even_spread:
+            slots = self._slot_angles(n_stations)
+            stations = [self._station(i + 1, slots[i]) for i in range(n_stations)]
+        else:
+            stations = [self._station(i + 1) for i in range(n_stations)]
         return {
             "cell": dict(self.base["cell"]),
             "robot_mount": dict(self.base["robot_mount"]),
             "belt": dict(self.base["belt"]),
             "part": dict(self.base["part"]),
-            "stations": [self._station(i + 1) for i in range(n_stations)],
+            "stations": stations,
             "task": self._relay_task(n_stations),
         }
 
@@ -470,6 +485,40 @@ class Annealer:
             traj.append(cost)
         return dict(best_cost=best[0], best_stations=best[1], best_order=best[2],
                     init_cost=traj[0], traj=traj, accepts=accepts, reheats=reheats, hp=self.hp)
+
+
+# ── synthesis QUALITY filter (aesthetic, on top of is_valid) ─────────────────────────
+# Applied during synthesis only (NOT in the core is_valid oracle, so the hand-authored
+# reference configs still validate). Makes synthesized cells look deliberate: real gaps
+# between conveyors, balanced spread around the robot, belts cleanly facing the arm.
+def layout_quality(doc, name="cand", min_gap=0.18, min_ang_deg=50.0, face_tol_deg=8.0):
+    cell = make_cell(doc, name)
+    m = cell["robot_mount"]
+    sts = cell["stations"]
+    # (1) CLEARANCE: inflate each footprint by min_gap; if inflated footprints still don't
+    #     overlap, the real conveyors have at least ~min_gap of space between them.
+    gl, gw = PHYS_FOOT_LEN + min_gap, PHYS_FOOT_WID + min_gap
+    foot = [_obb_corners(s["pose"]["x"], s["pose"]["y"], s["pose"]["yaw"], gl, gw) for s in sts]
+    for i in range(len(foot)):
+        for j in range(i + 1, len(foot)):
+            if _obb_overlap(foot[i], foot[j]):
+                return False, "gap"
+    # (2) EVEN SPREAD: every angular gap around the robot >= min_ang_deg (no clustering).
+    angs = sorted(math.atan2(s["pose"]["y"] - m["y"], s["pose"]["x"] - m["x"]) for s in sts)
+    n = len(angs)
+    sep = math.radians(min_ang_deg)
+    for i in range(n):
+        if ((angs[(i + 1) % n] - angs[i]) % (2 * math.pi)) < sep:
+            return False, "spread"
+    # (3) CLEAN ORIENTATION: each belt's yaw faces the robot (radial), within tolerance.
+    tol = math.radians(face_tol_deg)
+    for s in sts:
+        bx, by = s["pose"]["x"] - m["x"], s["pose"]["y"] - m["y"]
+        want = math.atan2(-by, -bx)
+        d = abs((s["pose"]["yaw"] - want + math.pi) % (2 * math.pi) - math.pi)
+        if d > tol:
+            return False, "tilt"
+    return True, "clean"
 
 
 # ── emit a synthesized config in the existing schema (drop-in to the generator) ──────

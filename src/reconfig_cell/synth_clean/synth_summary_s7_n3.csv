@@ -1,0 +1,5 @@
+idx,seed,n_stations,attempts,accepted,wall_s,surrogate,path,last_reason
+0,7,3,66,1,0.341,14.352914,synth_s7_n3_0.yaml,valid
+1,7,3,17,1,0.036,5.856211,synth_s7_n3_1.yaml,valid
+2,7,3,119,1,0.197,5.571763,synth_s7_n3_2.yaml,valid
+3,7,3,21,1,0.074,5.772697,synth_s7_n3_3.yaml,valid
