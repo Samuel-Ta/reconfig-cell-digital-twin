@@ -38,11 +38,19 @@ def main():
     n_pick = int(_arg("n_pick", "6"))
     out_dir = os.path.abspath(_arg("out_dir", "") or
                               os.path.expanduser("~/reconfig_ws/src/reconfig_cell/val_out"))
-    opt_dir = os.path.expanduser("~/reconfig_ws/src/reconfig_cell/opt_out")
+    opt_dir = _arg("opt_dir", "") or os.path.expanduser(
+        "~/reconfig_ws/src/reconfig_cell/opt_out_final")
+    base_config = _arg("base_config", "config_1") or "config_1"
     os.makedirs(out_dir, exist_ok=True)
 
-    desc = get_package_share_directory("cell_description")
-    base_doc = yaml.safe_load(open(os.path.join(desc, "config_1.yaml")))
+    if os.path.isfile(base_config):
+        base_path = base_config
+    elif os.path.isfile(base_config + ".yaml"):
+        base_path = base_config + ".yaml"
+    else:
+        base_path = os.path.join(get_package_share_directory("cell_description"),
+                                 f"{base_config}.yaml")
+    base_doc = yaml.safe_load(open(base_path))
 
     rclpy.init()
     moveit = MoveItPy(node_name="cell_synth")
@@ -59,11 +67,14 @@ def main():
     # 2) fresh random valids (mid/high end)
     prop = core.Proposer(base_doc, seed=777)
     tries = 0
-    while len([p for p in pool if p[2].startswith("rand")]) < n_pool and tries < n_pool * 80:
+    while len([p for p in pool if p[2].startswith("rand")]) < n_pool and tries < n_pool * 2500:
         tries += 1
         d = prop.sample(n_stations)
         ok, _ = oracle.is_valid(d, "rand")
         if not ok:
+            continue
+        ok_q, _ = core.layout_quality(d, "rand")   # final constraints (gap + facing)
+        if not ok_q:
             continue
         c = oracle.surrogate_det(d, "rand", n_ik=40)
         if c is not None:

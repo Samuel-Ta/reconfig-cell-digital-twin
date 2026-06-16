@@ -72,8 +72,16 @@ def main():
                               os.path.expanduser("~/reconfig_ws/src/reconfig_cell/opt_out"))
     os.makedirs(out_dir, exist_ok=True)
 
-    desc = get_package_share_directory("cell_description")
-    with open(os.path.join(desc, f"{base_config}.yaml")) as f:
+    # base_config may be a NAME in cell_description or a direct path (optimize around a
+    # custom robot_mount, e.g. a hand-placed robot)
+    if os.path.isfile(base_config):
+        base_path = base_config
+    elif os.path.isfile(base_config + ".yaml"):
+        base_path = base_config + ".yaml"
+    else:
+        base_path = os.path.join(get_package_share_directory("cell_description"),
+                                 f"{base_config}.yaml")
+    with open(base_path) as f:
         base_doc = yaml.safe_load(f)
 
     rclpy.init()
