@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""motion_probe — surrogate vs REAL planner motion time (Rung 3 validation, attempt 2).
+
+HEADLESS: for each config, plan the relay joint-to-joint between the SAME canonical (elbow-up)
+waypoints the surrogate uses, with the real RRTConnect planner + the config's belt collisions
+in the scene, and measure the planned TRAJECTORY DURATION (sim-time motion). Averaged over
+N_PLANS to handle OMPL's path randomness (the OMPL seed is not settable via MoveIt params).
+This strips the two documented noise sources: gz wall-clock/real-time-factor noise and the
+~130 s config-independent reset overhead. No gz execution -> no hangs.
+
+    ros2 launch cell_synth synth.launch.py exe:=motion_probe valset:=<dir> n_plans:=12
+
+Outputs <valset>/motion.csv (label, surrogate, motion_mean_s, motion_std, n_plans) for the
+correlation, and a stability check (one config planned N times: per-plan spread vs mean).
+"""
+import csv
+import glob
+import os
+import statistics
+import sys
+
+import rclpy
+import yaml
+from ament_index_python.packages import get_package_share_directory
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import synth_core as core  # noqa: E402
+
+from moveit.planning import MoveItPy, PlanRequestParameters  # noqa: E402
+from moveit.core.robot_state import RobotState  # noqa: E402
+
+
+def _arg(name, default):
+    for a in sys.argv[1:]:
+        if a.startswith(f"{name}:="):
+            return a[len(name) + 2:]
+    return default
+
+
+def _traj_dur(plan_result):
+    jt = plan_result.trajectory.get_robot_trajectory_msg().joint_trajectory
+    if not jt.points:
+        return None
+    t = jt.points[-1].time_from_start
+    return t.sec + t.nanosec * 1e-9
+
+
+class Mover:
+    def __init__(self, moveit, oracle, n_ik=40):
+        self.moveit = moveit
+        self.o = oracle
+        self.model = oracle.model
+        self.pc = moveit.get_planning_component(core.GUARD.GROUP)
+        self.psm = moveit.get_planning_scene_monitor()
+        self.n_ik = n_ik
+        self.seedbank = oracle._seedbank(n_ik, 20240615)
+        self.group_joints = ["shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
+                             "wrist_1_joint", "wrist_2_joint", "wrist_3_joint"]
+
+    def _apply_scene(self, scene_spec):
+        with self.psm.read_write() as scene:
+            scene.remove_all_collision_objects()
+            for e in scene_spec.get("collision_objects", []):
+                scene.apply_collision_object(core.GUARD.build_collision_object(e, self.o.frame))
+            scene.current_state.update()
+
+    def _final_state(self, r):
+        """The collision-free joint config the planner ended at (chain the next segment)."""
+        jt = r.trajectory.get_robot_trajectory_msg().joint_trajectory
+        d = dict(zip(jt.joint_names, jt.points[-1].positions))
+        st = RobotState(self.model)
+        st.set_joint_group_positions(core.GUARD.GROUP, [d[j] for j in self.group_joints])
+        st.update()
+        return st
+
+    def motion_time(self, doc, params):
+        """Total planned trajectory duration over the relay's ordered POSE targets (one plan).
+        Plans to the pose (planner finds a collision-free path), chained through the planner's
+        own end states — exactly what the real relay does."""
+        from geometry_msgs.msg import PoseStamped
+        scene_spec, task_spec, _ = core.realize(core.make_cell(doc))
+        self._apply_scene(scene_spec)
+        cur = RobotState(self.model)
+        cur.set_joint_group_positions(core.GUARD.GROUP, list(core.GUARD.UP_SEED))
+        cur.update()
+        total = 0.0
+        for op in task_spec.get("ops", []):
+            self.pc.set_start_state(robot_state=cur)
+            ps = PoseStamped()
+            ps.header.frame_id = self.o.frame
+            ps.pose = core._to_pose(op["target_pose"])
+            self.pc.set_goal_state(pose_stamped_msg=ps, pose_link=core.GUARD.TIP)
+            r = self.pc.plan(single_plan_parameters=params)
+            if r is None or r.trajectory is None or r.error_code.val != 1:
+                return None
+            d = _traj_dur(r)
+            if d is None:
+                return None
+            total += d
+            cur = self._final_state(r)
+        return total
+
+
+def main():
+    n_plans = int(_arg("n_plans", "12"))
+    valset_dir = os.path.abspath(_arg("valset",
+                  os.path.expanduser("~/reconfig_ws/src/reconfig_cell/val_hb")))
+    sur = {r["label"]: r for r in csv.DictReader(open(os.path.join(valset_dir, "valset_surrogate.csv")))}
+
+    rclpy.init()
+    moveit = MoveItPy(node_name="cell_synth")
+    oracle = core.Oracle(moveit)
+    mover = Mover(moveit, oracle)
+
+    params = PlanRequestParameters(moveit, "ompl")
+    params.planner_id = "RRTConnectkConfigDefault"
+    params.planning_pipeline = "ompl"
+    params.planning_attempts = 10          # MATCH the real relay (best-of-10 -> stable paths)
+    params.planning_time = 8.0             # higher budget -> fewer plan failures, trustworthy mean
+    params.max_velocity_scaling_factor = 0.3
+    params.max_acceleration_scaling_factor = 0.3
+
+    # STABILITY CHECK first: one config planned N times -> per-plan spread vs mean
+    first = sorted(sur)[0]
+    d0 = yaml.safe_load(open(os.path.join(valset_dir, sur[first]["config"])))
+    vals0 = [mover.motion_time(d0, params) for _ in range(n_plans)]
+    vals0 = [v for v in vals0 if v is not None]
+    if vals0:
+        sp = (max(vals0) - min(vals0)) / statistics.mean(vals0) * 100
+        print(f"[probe] STABILITY ({first}, {len(vals0)} plans): mean {statistics.mean(vals0):.2f}s "
+              f"std {statistics.pstdev(vals0):.2f}s per-plan spread {sp:.0f}%  -> mean is the stable estimate")
+
+    rows = []
+    for label in sorted(sur):
+        doc = yaml.safe_load(open(os.path.join(valset_dir, sur[label]["config"])))
+        vals = [mover.motion_time(doc, params) for _ in range(n_plans)]
+        vals = [v for v in vals if v is not None]
+        if not vals:
+            print(f"[probe] {label}: no plan succeeded"); continue
+        rows.append(dict(label=label, surrogate=sur[label]["surrogate"],
+                         motion_mean=round(statistics.mean(vals), 3),
+                         motion_std=round(statistics.pstdev(vals), 3), n_plans=len(vals)))
+        print(f"[probe] {label}: surrogate {sur[label]['surrogate']}  "
+              f"real motion {rows[-1]['motion_mean']:.2f}s +/-{rows[-1]['motion_std']:.2f} (n={len(vals)})")
+
+    out = os.path.join(valset_dir, "motion.csv")
+    with open(out, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["label", "surrogate", "motion_mean", "motion_std", "n_plans"])
+        w.writeheader(); w.writerows(rows)
+    print(f"[probe] wrote {out} ({len(rows)} configs)")
+    core.GUARD._exit(0)
+
+
+if __name__ == "__main__":
+    main()

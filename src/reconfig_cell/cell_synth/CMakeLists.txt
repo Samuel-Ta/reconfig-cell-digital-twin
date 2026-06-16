@@ -11,6 +11,7 @@ install(PROGRAMS
   scripts/score_probe
   scripts/optimize
   scripts/valset
+  scripts/motion_probe
   scripts/plot_results.py
   DESTINATION lib/${PROJECT_NAME}
 )

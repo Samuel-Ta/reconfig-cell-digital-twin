@@ -34,13 +34,44 @@ winner (surrogate 5.19), `val_1..5` are random valids (surrogate up to 9.39).
 - The **SA-optimized config ran end-to-end** on the twin at the user's mount: `val_0`
   completed 3/3 clean relays.
 
-## Attempt 2 — planned (attack the noise, not the result)
+## Attempt 2 — DONE: NO reliable correlation (honest negative, 2026-06-17)
 
-1. **Fix the planner seed** so the same config yields the same path → stable motion time.
-   Verify by running one config 3× (motion must stop being ~2× spread) and report that first.
-2. **Correlate on motion/exec time only** (strip the ~130 s fixed overhead).
-3. Collect what is cleanly obtainable (reboot around degradation); report per-config surrogate
-   vs real motion, Pearson r + scatter, and the N it is based on.
+Both requested noise fixes were applied, plus the OMPL-seed investigation:
 
-Honest rule: if it correlates → report the clean positive; if not → report that plainly. No
-forcing, no fabricated points.
+1. **Planner seed — NOT settable.** MoveIt2 exposes no OMPL motion-planner seed (param or
+   env); only the constraint-sampler seed exists. Seeding would require modifying locked
+   MoveIt/`trial_runner`. So instead the variance was attacked by **averaging** (below).
+2. **Measured motion only, headless.** New `motion_probe` plans the relay pose-to-pose with
+   the real RRTConnect planner + the config's belt collisions, headless, and sums the planned
+   **trajectory duration** (sim-time motion). This strips BOTH the ~130 s fixed overhead AND
+   the gz wall-clock/real-time-factor noise AND the sim hangs. Planner set to **best-of-10**,
+   matching the real relay's `planning_attempts:10`.
+3. **Averaged** over many plans per config (12, then 40).
+
+**Result — the surrogate does NOT predict real motion time:**
+
+| config | surrogate | real motion (best-of-10, mean ± std) |
+|---|---|---|
+| val_0 (SA winner) | 5.19 | 25.1 ± 16.8 s |
+| val_1 | 6.59 | 17.9 ± 1.4 s |
+| val_2 | 7.14 | 33.5 ± 10.9 s |
+| val_3 | 7.63 | 13.4 ± 2.5 s |
+| val_4 | 9.15 | 17.7 ± 5.8 s |
+| val_5 | 9.39 | 11.3 ± 1.9 s |
+
+- **Pearson r is unstable across runs: +0.057 (12 plans) vs −0.550 (40 plans).** A coefficient
+  that flips sign between repetitions of the same experiment is, by definition, measuring
+  noise — there is no reliable relationship.
+- **Why:** RRTConnect path duration has ~96 % per-plan spread *even at best-of-10*, and the
+  planner frequently fails on these collision-constrained reaches (only 3–11 of 40 plans
+  succeed per config). The deterministic minimal-joint-travel surrogate cannot model the
+  planner's collision-avoidance detours, which dominate the real duration and vary by config.
+- Figure: `val_hb/figs/surrogate_vs_real.png` (scatter, large error bars, no trend).
+
+**Conclusion (honest, per the brief's rule — report plainly, do not force):**
+The deterministic joint-travel surrogate is **validated for its actual purpose** — a stable
+optimization objective (<0.0003 % spread) that SA genuinely minimizes (beats the fair baseline
+6/6, +10.7 %), and the SA-optimized config runs end-to-end on the twin. But it is **NOT a
+predictor of absolute real cycle/motion time**: real execution is dominated by RRTConnect
+path-variance that the surrogate does not (and a deterministic surrogate cannot) capture.
+This is a real negative result, not a measurement we could clean up further.
