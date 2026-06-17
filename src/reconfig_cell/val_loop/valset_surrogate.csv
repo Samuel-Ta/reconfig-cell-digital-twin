@@ -1,0 +1,6 @@
+label,surrogate,source,config
+win_s100,4.7497,SA_seed100,win_s100.yaml
+win_s101,4.4529,SA_seed101,win_s101.yaml
+win_s102,4.4682,SA_seed102,win_s102.yaml
+win_s103,4.7739,SA_seed103,win_s103.yaml
+win_s104,4.8868,SA_seed104,win_s104.yaml

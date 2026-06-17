@@ -41,6 +41,16 @@ def launch_setup(context, *args, **kwargs):
     )
     mp_params = moveit_config.to_dict()
     mp_params["planning_pipelines"] = {"pipeline_names": mp_params["planning_pipelines"]}
+    # MoveItConfigsBuilder loads moveit's DEFAULT ompl config (global planner list, no group
+    # section), so the group-qualified key 'ur_manipulator[<planner>]' the planner-selection
+    # lookup needs is absent. Inject the group's planner list so motion_probe can request an
+    # OPTIMIZING planner (RRTstar) by name. Only the (headless) motion_probe plans; the other
+    # synth exes are IK-only, so this is inert for them.
+    if "ompl" in mp_params:
+        mp_params["ompl"]["ur_manipulator"] = {
+            "default_planner_config": "RRTConnect",
+            "planner_configs": ["RRTConnect", "RRTstar", "PRMstar", "TRRT"],
+        }
 
     shim = os.path.join(os.path.expanduser("~"), "reconfig_ws", "fastcdr_compat.so")
     env = {"LD_PRELOAD": shim} if os.path.exists(shim) else {}
@@ -50,7 +60,8 @@ def launch_setup(context, *args, **kwargs):
            for n in ("k", "n_stations", "seed", "max_attempts", "base_config", "out_dir",
                      "n_specs", "base_seed", "iters", "n_ik",
                      "quality", "min_gap", "min_ang",
-                     "opt_dir", "n_pool", "n_pick")]
+                     "opt_dir", "n_pool", "n_pick",
+                     "valset", "n_plans", "planner", "planning_time")]
 
     node = Node(package="cell_synth", executable=exe, name="cell_synth", output="screen",
                 additional_env=env, arguments=fwd,
@@ -82,5 +93,9 @@ def generate_launch_description():
         DeclareLaunchArgument("opt_dir", default_value=""),
         DeclareLaunchArgument("n_pool", default_value="50"),
         DeclareLaunchArgument("n_pick", default_value="6"),
+        DeclareLaunchArgument("valset", default_value=""),
+        DeclareLaunchArgument("n_plans", default_value="12"),
+        DeclareLaunchArgument("planner", default_value="RRTstar"),
+        DeclareLaunchArgument("planning_time", default_value="10.0"),
         OpaqueFunction(function=launch_setup),
     ])

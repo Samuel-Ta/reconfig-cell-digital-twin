@@ -263,6 +263,64 @@ class Oracle:
         return [list(GUARD.UP_SEED)] + [
             [rng.uniform(-math.pi, math.pi) for _ in range(6)] for _ in range(n_ik - 1)]
 
+    def solve_ik_seeded(self, pose, seed_q, scene=None, tries=24):
+        """Collision-free IK SEEDED from seed_q so the solution stays on the same kinematic
+        branch as the previous station (no fake elbow-flips). Returns joint list or None."""
+        st = RobotState(self.model)
+        st.set_joint_group_positions(GUARD.GROUP, list(seed_q))
+        st.update()
+        if st.set_from_ik(GUARD.GROUP, pose, GUARD.TIP, 0.05):
+            if scene is None or not scene.is_state_colliding(st, GUARD.GROUP):
+                return list(st.get_joint_group_positions(GUARD.GROUP))
+        for _ in range(tries):                         # jitter NEAR the seed (stay in branch)
+            st = RobotState(self.model)
+            st.set_joint_group_positions(
+                GUARD.GROUP, [s + random.uniform(-0.35, 0.35) for s in seed_q])
+            st.update()
+            if st.set_from_ik(GUARD.GROUP, pose, GUARD.TIP, 0.05):
+                if scene is None or not scene.is_state_colliding(st, GUARD.GROUP):
+                    return list(st.get_joint_group_positions(GUARD.GROUP))
+        return None
+
+    def solve_ik_continuous(self, pose, prev_q, scene, seedbank):
+        """Collision-free IK (vs `scene`) CLOSEST to prev_q -> same kinematic branch as the
+        previous station (continuity, no elbow-flips). Uses the full seed bank so it converges
+        robustly. Returns joint list or None."""
+        best = None
+        for seed in seedbank:
+            st = RobotState(self.model)
+            st.set_joint_group_positions(GUARD.GROUP, seed)
+            st.update()
+            if st.set_from_ik(GUARD.GROUP, pose, GUARD.TIP, 0.05):
+                if scene is None or not scene.is_state_colliding(st, GUARD.GROUP):
+                    q = list(st.get_joint_group_positions(GUARD.GROUP))
+                    d = sum((a - b) ** 2 for a, b in zip(q, prev_q))
+                    if best is None or d < best[0]:
+                        best = (d, q)
+        return None if best is None else best[1]
+
+    def tsp_order(self, doc, n_ik=40, ik_seed=20240615):
+        """Brute-force optimal station visit order (small N) minimizing canonical-IK joint
+        travel along home -> s[0] -> s[1] -> ... Returns the ordered list of station ids."""
+        import itertools
+        _, task_spec, _ = realize(make_cell(doc))
+        targ = {}
+        for op in task_spec.get("ops", []):
+            targ.setdefault(op["station"], _to_pose(op["target_pose"]))
+        sids = list(targ.keys())
+        seedbank = self._seedbank(n_ik, ik_seed)
+        canon = {s: self._canonical_ik(targ[s], seedbank) for s in sids}
+        if any(v is None for v in canon.values()):
+            return sids
+        def cost(order):
+            prev, tot = list(GUARD.UP_SEED), 0.0
+            for s in order:
+                q = canon[s]
+                tot += max(abs(a - b) for a, b in zip(q, prev))
+                prev = q
+            return tot
+        return list(min(itertools.permutations(sids), key=cost))
+
     def surrogate_det(self, doc, name="candidate", task_spec=None, n_ik=40, ik_seed=20240615):
         """Deterministic joint-travel surrogate over the FULL ordered pick->place sequence.
         Sum of slowest-joint travel between consecutive CANONICAL (elbow-up) IK solutions,

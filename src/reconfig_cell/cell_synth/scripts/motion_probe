@@ -57,54 +57,73 @@ class Mover:
         self.group_joints = ["shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
                              "wrist_1_joint", "wrist_2_joint", "wrist_3_joint"]
 
-    def _apply_scene(self, scene_spec):
-        with self.psm.read_write() as scene:
+    def _cos(self, scene_spec):
+        return [core.GUARD.build_collision_object(e, self.o.frame)
+                for e in scene_spec.get("collision_objects", [])]
+
+    def _apply_scene(self, cos, exclude_ids=()):
+        """Apply every belt EXCEPT those in `exclude_ids` to BOTH the planner scene and the
+        oracle's IK-collision scene. A transfer segment A->B leaves fixture A and approaches
+        fixture B, so BOTH endpoint belts are excluded (approaching/leaving a fixture is
+        required, not a collision — is_valid's rule, applied to both ends); every OTHER belt
+        stays in and must be avoided."""
+        ex = set(exclude_ids)
+        with self.psm.read_write() as scene:         # for the PLANNER
             scene.remove_all_collision_objects()
-            for e in scene_spec.get("collision_objects", []):
-                scene.apply_collision_object(core.GUARD.build_collision_object(e, self.o.frame))
+            for co in cos:
+                if co.id not in ex:
+                    scene.apply_collision_object(co)
             scene.current_state.update()
+        self.o.scene.remove_all_collision_objects()   # for the IK collision check
+        for co in cos:
+            if co.id not in ex:
+                self.o.scene.apply_collision_object(co)
+        self.o.scene.current_state.update()
 
-    def _final_state(self, r):
-        """The collision-free joint config the planner ended at (chain the next segment)."""
-        jt = r.trajectory.get_robot_trajectory_msg().joint_trajectory
-        d = dict(zip(jt.joint_names, jt.points[-1].positions))
-        st = RobotState(self.model)
-        st.set_joint_group_positions(core.GUARD.GROUP, [d[j] for j in self.group_joints])
-        st.update()
-        return st
-
-    def motion_time(self, doc, params):
-        """Total planned trajectory duration over the relay's ordered POSE targets (one plan).
-        Plans to the pose (planner finds a collision-free path), chained through the planner's
-        own end states — exactly what the real relay does."""
-        from geometry_msgs.msg import PoseStamped
-        scene_spec, task_spec, _ = core.realize(core.make_cell(doc))
-        self._apply_scene(scene_spec)
-        cur = RobotState(self.model)
-        cur.set_joint_group_positions(core.GUARD.GROUP, list(core.GUARD.UP_SEED))
-        cur.update()
+    def motion_time(self, task_spec, scene_spec, params):
+        """Total planned trajectory duration over the (TSP-ordered) relay, planned JOINT-to-
+        JOINT. Per op: exclude the target's own belt (is_valid's rule), pick the collision-free
+        IK goal in the SAME kinematic branch as the previous station (continuity -> no fake
+        elbow-flip spikes), and plan with the OPTIMIZING planner (RRTstar) so path length is
+        minimized and tracks the minimal-joint-travel surrogate."""
+        dbg = os.environ.get("DEBUG_PROBE")
+        cos = self._cos(scene_spec)
+        prev_q = list(core.GUARD.UP_SEED)
+        prev_sta = None
         total = 0.0
-        for op in task_spec.get("ops", []):
-            self.pc.set_start_state(robot_state=cur)
-            ps = PoseStamped()
-            ps.header.frame_id = self.o.frame
-            ps.pose = core._to_pose(op["target_pose"])
-            self.pc.set_goal_state(pose_stamped_msg=ps, pose_link=core.GUARD.TIP)
+        for i, op in enumerate(task_spec.get("ops", [])):
+            self._apply_scene(cos, exclude_ids=(prev_sta, op["station"]))
+            goal_q = self.o.solve_ik_continuous(
+                core._to_pose(op["target_pose"]), prev_q, self.o.scene, self.seedbank)
+            if goal_q is None:
+                if dbg:
+                    print(f"[dbg] op{i} sta={op['station']}: solve_ik_continuous -> None")
+                return None
+            start = RobotState(self.model)
+            start.set_joint_group_positions(core.GUARD.GROUP, prev_q); start.update()
+            goal = RobotState(self.model)
+            goal.set_joint_group_positions(core.GUARD.GROUP, goal_q); goal.update()
+            self.pc.set_start_state(robot_state=start)
+            self.pc.set_goal_state(robot_state=goal)
             r = self.pc.plan(single_plan_parameters=params)
             if r is None or r.trajectory is None or r.error_code.val != 1:
+                if dbg:
+                    ec = None if r is None else r.error_code.val
+                    print(f"[dbg] op{i} sta={op['station']}: plan failed error_code={ec}")
                 return None
             d = _traj_dur(r)
             if d is None:
                 return None
             total += d
-            cur = self._final_state(r)
+            prev_q = goal_q                            # continuity: next start = this goal
+            prev_sta = op["station"]
         return total
 
 
 def main():
     n_plans = int(_arg("n_plans", "12"))
-    valset_dir = os.path.abspath(_arg("valset",
-                  os.path.expanduser("~/reconfig_ws/src/reconfig_cell/val_hb")))
+    valset_dir = os.path.abspath(_arg("valset", "") or
+                  os.path.expanduser("~/reconfig_ws/src/reconfig_cell/val_hb"))
     sur = {r["label"]: r for r in csv.DictReader(open(os.path.join(valset_dir, "valset_surrogate.csv")))}
 
     rclpy.init()
@@ -112,40 +131,56 @@ def main():
     oracle = core.Oracle(moveit)
     mover = Mover(moveit, oracle)
 
+    planner = _arg("planner", "RRTstar")     # OPTIMIZING planner
     params = PlanRequestParameters(moveit, "ompl")
-    params.planner_id = "RRTConnectkConfigDefault"
+    params.planner_id = planner
     params.planning_pipeline = "ompl"
-    params.planning_attempts = 10          # MATCH the real relay (best-of-10 -> stable paths)
-    params.planning_time = 8.0             # higher budget -> fewer plan failures, trustworthy mean
+    params.planning_attempts = 1           # RRTstar optimizes within one run (over planning_time)
+    params.planning_time = float(_arg("planning_time", "10.0"))
     params.max_velocity_scaling_factor = 0.3
     params.max_acceleration_scaling_factor = 0.3
+    print(f"[probe] planner={planner} planning_time={params.planning_time}s n_plans={n_plans}")
+
+    def prep(doc):
+        """Fix the visit order by brute-force TSP, then realize -> (task_spec, scene_spec,
+        surrogate-on-this-order). Surrogate and real motion use the SAME (TSP) order."""
+        order = oracle.tsp_order(doc)
+        d2 = dict(doc); d2["task"] = core.relay_from_order(order)
+        scene_spec, task_spec, _ = core.realize(core.make_cell(d2))
+        s = oracle.surrogate_det(d2, task_spec=task_spec)
+        return task_spec, scene_spec, s, order
 
     # STABILITY CHECK first: one config planned N times -> per-plan spread vs mean
     first = sorted(sur)[0]
-    d0 = yaml.safe_load(open(os.path.join(valset_dir, sur[first]["config"])))
-    vals0 = [mover.motion_time(d0, params) for _ in range(n_plans)]
+    ts0, sc0, s0, ord0 = prep(yaml.safe_load(open(os.path.join(valset_dir, sur[first]["config"]))))
+    vals0 = [mover.motion_time(ts0, sc0, params) for _ in range(n_plans)]
     vals0 = [v for v in vals0 if v is not None]
     if vals0:
         sp = (max(vals0) - min(vals0)) / statistics.mean(vals0) * 100
-        print(f"[probe] STABILITY ({first}, {len(vals0)} plans): mean {statistics.mean(vals0):.2f}s "
-              f"std {statistics.pstdev(vals0):.2f}s per-plan spread {sp:.0f}%  -> mean is the stable estimate")
+        print(f"[probe] STABILITY ({first}, {len(vals0)}/{n_plans} plans): mean {statistics.mean(vals0):.2f}s "
+              f"std {statistics.pstdev(vals0):.2f}s per-plan spread {sp:.0f}%")
 
     rows = []
     for label in sorted(sur):
         doc = yaml.safe_load(open(os.path.join(valset_dir, sur[label]["config"])))
-        vals = [mover.motion_time(doc, params) for _ in range(n_plans)]
+        task_spec, scene_spec, s_tsp, order = prep(doc)
+        vals = [mover.motion_time(task_spec, scene_spec, params) for _ in range(n_plans)]
         vals = [v for v in vals if v is not None]
         if not vals:
             print(f"[probe] {label}: no plan succeeded"); continue
-        rows.append(dict(label=label, surrogate=sur[label]["surrogate"],
+        rows.append(dict(label=label, surrogate=round(s_tsp, 4),
                          motion_mean=round(statistics.mean(vals), 3),
+                         motion_min=round(min(vals), 3),
+                         motion_median=round(statistics.median(vals), 3),
                          motion_std=round(statistics.pstdev(vals), 3), n_plans=len(vals)))
-        print(f"[probe] {label}: surrogate {sur[label]['surrogate']}  "
-              f"real motion {rows[-1]['motion_mean']:.2f}s +/-{rows[-1]['motion_std']:.2f} (n={len(vals)})")
+        print(f"[probe] {label}: surrogate(TSP) {s_tsp:.3f}  motion mean {rows[-1]['motion_mean']:.2f}s "
+              f"min {rows[-1]['motion_min']:.2f}s med {rows[-1]['motion_median']:.2f}s "
+              f"+/-{rows[-1]['motion_std']:.2f} (n={len(vals)})")
 
     out = os.path.join(valset_dir, "motion.csv")
     with open(out, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["label", "surrogate", "motion_mean", "motion_std", "n_plans"])
+        w = csv.DictWriter(f, fieldnames=["label", "surrogate", "motion_mean", "motion_min",
+                                          "motion_median", "motion_std", "n_plans"])
         w.writeheader(); w.writerows(rows)
     print(f"[probe] wrote {out} ({len(rows)} configs)")
     core.GUARD._exit(0)

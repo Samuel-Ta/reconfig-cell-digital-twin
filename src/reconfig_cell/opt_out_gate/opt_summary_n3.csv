@@ -1,0 +1,6 @@
+seed,n_stations,init_cost,sa_cost,baseline_cost,impr_vs_baseline_pct,impr_vs_init_pct,accepts,iters,sa_wall_s,base_wall_s,best_order,config
+100,3,5.7043,4.7503,6.4907,26.81,16.72,220,400,248.69,4.2,conveyor_3|conveyor_1|conveyor_2,sa_s100_n3.yaml
+101,3,5.2614,4.4529,6.1543,27.65,15.37,218,400,211.72,6.72,conveyor_3|conveyor_1|conveyor_2,sa_s101_n3.yaml
+102,3,5.3012,4.4682,5.2096,14.23,15.71,201,400,276.48,12.65,conveyor_2|conveyor_1|conveyor_3,sa_s102_n3.yaml
+103,3,5.1716,4.7743,5.3547,10.84,7.68,213,400,257.84,7.16,conveyor_1|conveyor_3|conveyor_2,sa_s103_n3.yaml
+104,3,5.2755,4.8873,5.2869,7.56,7.36,225,400,228.33,5.17,conveyor_1|conveyor_3|conveyor_2,sa_s104_n3.yaml
