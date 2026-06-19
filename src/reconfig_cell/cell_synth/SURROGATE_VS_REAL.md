@@ -143,3 +143,24 @@ with the 6 prior valids (n = 11):
 **Spec complete:** surrogate is a stable objective (<0.0003 % spread) → SA provably minimizes it
 vs a fair floor (5/5, −17.4 %) → surrogate provably predicts real optimizing-planner motion
 (r = 0.88) → SA winners are provably faster in real motion (−19.4 %). End to end.
+
+## Visual capstone — feasible winner runs clean in the full twin GUI (2026-06-19)
+
+The closed loop above is proven on *headless motion time*. As the executable visual capstone, the
+feasible SA winner `val_0` (surrogate 5.19, robot at the hand mount) was launched in the FULL
+high-fidelity twin (Gazebo Harmonic GUI + full `move_group` + real RG2 + welded-cube carry) via
+`synth_trials.launch.py`. Realized config: `demo_gate/val_0_n3/{scene,task}.yaml`.
+
+- IK guard PASSED (all 3 stations reachable, scene applied).
+- **Warmup**: `success=True cause=none cycle=133.0 s`, gripper clear at start = True.
+- **Trial 1/1**: `success=True cause=none cycle=148.0 s`, gripper clear at start = True.
+- Both rows in the run CSV are `success=1, failure_cause=none`; all 4 ops
+  (pick→place→pick→place) executed, every segment reporting `Goal reached, success!` /
+  `SUCCEEDED` — no `plan_fail`, no cascade.
+
+**Honest caveat (documented finding):** `val_0` is a *feasible* prior SA winner. The two newest
+*aggressive* winners (`sa_s101`, `sa_s104`) minimise joint travel hard enough that the headless
+RRTstar/belt-excluded probe solves them but the full twin's RRTConnect (+ real RG2 collision +
+welded carry) cannot execute the cramped later segments (first move succeeds, a later relay
+segment `plan_fail`s ~19 s in). So: the closed loop holds for motion-TIME *prediction*; the
+clean executable *visual* demo is `val_0`.
