@@ -1,0 +1,9 @@
+# local LaTeX compiler binary (downloaded, ~56MB) and its archive — not source
+tectonic
+*.tar.gz
+# tectonic/latex build artifacts
+*.aux
+*.log
+*.out
+*.bbl
+*.blg
