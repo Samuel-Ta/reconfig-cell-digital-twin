@@ -11,6 +11,7 @@ install(PROGRAMS
   scripts/score_probe
   scripts/optimize
   scripts/compare_optimizers
+  scripts/synth_fullcell
   scripts/plot_compare.py
   scripts/valset
   scripts/motion_probe

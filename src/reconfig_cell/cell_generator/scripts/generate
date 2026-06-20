@@ -64,10 +64,19 @@ def validate(cell):
 
 
 # ── derivation ──────────────────────────────────────────────────────────────────
+def base_yaw(cell):
+    """robot base yaw in world (Phase-2 full-cell synthesis). Absent -> 0 (axis-aligned),
+    so every pre-existing config is byte-identical to before."""
+    return float(cell["robot_mount"].get("yaw", 0.0))
+
+
 def base_xy(cell, station):
-    """conveyor world (x,y) -> robot base_link (x,y) (robot mounted at yaw 0)."""
+    """conveyor world (x,y) -> robot base_link (x,y), rotating by the base yaw (-psi)."""
     m = cell["robot_mount"]
-    return station["pose"]["x"] - m["x"], station["pose"]["y"] - m["y"]
+    dx, dy = station["pose"]["x"] - m["x"], station["pose"]["y"] - m["y"]
+    psi = base_yaw(cell)
+    c, s = math.cos(-psi), math.sin(-psi)
+    return c * dx - s * dy, s * dx + c * dy
 
 
 def belt_target(cell, station):
@@ -92,8 +101,11 @@ def grasp_z(cell):
 def spawn_world(cell, station):
     """WORLD pose where the cube rests on this conveyor's belt (for the first pick)."""
     m = cell["robot_mount"]
-    sx, sy = belt_target(cell, station)
-    return sx + m["x"], sy + m["y"], cell["belt"]["top_z"] + part_half(cell)
+    sx, sy = belt_target(cell, station)                 # base frame
+    psi = base_yaw(cell)
+    c, s = math.cos(psi), math.sin(psi)                 # base -> world rotation (+psi)
+    return m["x"] + c * sx - s * sy, m["y"] + s * sx + c * sy, \
+        cell["belt"]["top_z"] + part_half(cell)
 
 
 # ── emitters ────────────────────────────────────────────────────────────────────
@@ -115,7 +127,7 @@ def emit_scene(cell, by_id):
         s = by_id[sid]
         bx, by = base_xy(cell, s)
         cz = cell["belt"]["top_z"] - BELT_BOX_THK / 2.0 - mz      # slab top at belt top
-        qx, qy, qz, qw = rpy_to_quat(0, 0, s["pose"]["yaw"])
+        qx, qy, qz, qw = rpy_to_quat(0, 0, s["pose"]["yaw"] - base_yaw(cell))
         L += [f'  - id: {sid}',
               f'    primitive: {{type: BOX, dimensions: [{BELT_BOX_LEN}, {BELT_BOX_WID}, {BELT_BOX_THK}]}}',
               f'    pose: {{x: {fmt(bx)}, y: {fmt(by)}, z: {fmt(cz)}, '

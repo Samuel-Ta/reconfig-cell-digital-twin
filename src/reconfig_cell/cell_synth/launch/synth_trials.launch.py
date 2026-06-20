@@ -127,9 +127,11 @@ def launch_setup(context, *args, **kwargs):
     # spawn the robot at the config's robot_mount (so the cell can be relocated; the
     # generated grasp targets are derived relative to this same mount)
     mx, my, mz = str(mount["x"]), str(mount["y"]), str(mount["z"])
+    myaw = str(mount.get("yaw", 0.0))      # Phase-2: spawn at the config's base yaw (absent->0)
     spawn_robot = Node(package="ros_gz_sim", executable="create", output="screen",
                        arguments=["-string", robot_description_content, "-name", "ur5_rg2",
-                                  "-x", mx, "-y", my, "-z", mz, "-allow_renaming", "true"])
+                                  "-x", mx, "-y", my, "-z", mz, "-Y", myaw,
+                                  "-allow_renaming", "true"])
     # move the (free, static) pedestal under the relocated robot base
     move_pedestal = ExecuteProcess(
         cmd=["gz", "service", "-s", "/world/default/set_pose",

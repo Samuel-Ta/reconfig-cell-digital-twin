@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+"""synth_fullcell — Phase 2: joint base-pose + station synthesis (SA, headless).
+
+    ros2 launch cell_synth synth.launch.py exe:=synth_fullcell \
+        n_specs:=6 base_seed:=300 n_stations:=3 iters:=140 n_ik:=20 \
+        fix_base:=0 arena_half:=0.6 out_dir:=<dir>
+
+Extends the Phase-1 fixed-mount optimizer: the robot BASE pose (x_b, y_b, psi_b) is now a
+decision variable alongside the station placements. Stations are sampled in the UR5 reach
+annulus RELATIVE TO THE SAMPLED BASE (base-frame polar (r, theta)); the base pose then places
+the whole cell in the world. Visit order is fixed by the existing brute-force TSP, SA is the
+engine (the justified Phase-1 choice), and everything else is locked: same deterministic
+surrogate (Oracle.surrogate_det), same validity oracle (Oracle.is_valid + layout_quality),
+same schema. The generator is base-yaw-aware (robot_mount.yaw, absent->0) so a sampled base is
+realized correctly into world/scene/task; the oracle and surrogate read the SAME robot_mount,
+so both see the same base transform for a candidate (consistency by construction).
+
+fix_base:=1 freezes the base at the base_config's mount (yaw 0) -> the optimizer reduces to the
+Phase-1 fixed-mount SA, the sanity check that the extension didn't break anything.
+"""
+import csv
+import itertools
+import math
+import os
+import statistics
+import sys
+
+import numpy as np
+import rclpy
+import yaml
+from ament_index_python.packages import get_package_share_directory
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import synth_core as core  # noqa: E402
+
+from moveit.planning import MoveItPy  # noqa: E402
+
+PENALTY, VIOL_W, IK_SEED = 100.0, 50.0, 20240615
+R_MIN, R_MAX = 0.60, 0.85
+
+
+def _arg(name, default):
+    for a in sys.argv[1:]:
+        if a.startswith(f"{name}:="):
+            return a[len(f"{name}:="):]
+    return default
+
+
+def _obb_pen(a, b):
+    best = float("inf")
+    for ax, ay in core._axes(a) + core._axes(b):
+        amin = min(px * ax + py * ay for px, py in a); amax = max(px * ax + py * ay for px, py in a)
+        bmin = min(px * ax + py * ay for px, py in b); bmax = max(px * ax + py * ay for px, py in b)
+        ov = min(amax, bmax) - max(amin, bmin)
+        if ov <= 0:
+            return 0.0
+        best = min(best, ov)
+    return best
+
+
+class Objective:
+    """f(z) over z = [x_b, y_b, psi_b, r_1, th_1, ...] (base pose + base-frame station polar)."""
+
+    def __init__(self, oracle, base_doc, n, n_ik, mount0, arena_half, fix_base):
+        self.o, self.base, self.n, self.n_ik = oracle, base_doc, n, n_ik
+        self.z = base_doc["robot_mount"]["z"]
+        self.mount0, self.fix_base = mount0, fix_base
+        self.seedbank = oracle._seedbank(n_ik, IK_SEED)
+        ax, ay = mount0["x"], mount0["y"]
+        # base bounds: a world arena box (warehouse-floor central region, clear of walls),
+        # centered on the known-good mount; station polar bounds are base-RELATIVE.
+        blo = [ax - arena_half, ay - arena_half, -math.pi]
+        bhi = [ax + arena_half, ay + arena_half, math.pi]
+        self.lo = np.array(blo + [R_MIN, -math.pi] * n)
+        self.hi = np.array(bhi + [R_MAX, math.pi] * n)
+        if fix_base:                                   # sanity check: pin base, search stations
+            self.lo[0:3] = [ax, ay, 0.0]; self.hi[0:3] = [ax, ay, 0.0]
+        self.n_var = 3 + 2 * n
+        self.reset()
+
+    def reset(self):
+        self.calls, self.history, self.best = 0, [], (float("inf"), None)
+
+    def _doc(self, z):
+        bx, by, psi = float(z[0]), float(z[1]), float(z[2])
+        c, s = math.cos(psi), math.sin(psi)
+        sts = []
+        for i in range(self.n):
+            r, th = float(z[3 + 2 * i]), float(z[4 + 2 * i])
+            ox, oy = r * math.cos(th), r * math.sin(th)               # base-frame offset
+            wx, wy = bx + c * ox - s * oy, by + s * ox + c * oy       # world
+            yaw = psi + th + math.pi                                  # radial facing, in world
+            sts.append({"id": f"conveyor_{i + 1}",
+                        "pose": {"x": round(wx, 6), "y": round(wy, 6),
+                                 "yaw": round((yaw + math.pi) % (2 * math.pi) - math.pi, 6)}})
+        mount = {"x": round(bx, 6), "y": round(by, 6), "z": self.z, "yaw": round(psi, 6)}
+        order = [s["id"] for s in sts]
+        doc = {"cell": dict(self.base["cell"]), "robot_mount": mount,
+               "belt": dict(self.base["belt"]), "part": dict(self.base["part"]),
+               "stations": [{"id": s["id"], "type": "conveyor", "pose": dict(s["pose"])} for s in sts],
+               "task": core.relay_from_order(order)}
+        return doc, sts
+
+    def _order_cost(self, doc):
+        _, task, _ = core.realize(core.make_cell(doc))
+        targ = {}
+        for op in task.get("ops", []):
+            targ.setdefault(op["station"], core._to_pose(op["target_pose"]))
+        sids = list(targ)
+        canon = {s: self.o._canonical_ik(targ[s], self.seedbank) for s in sids}
+        if any(v is None for v in canon.values()):
+            return None, None
+        up = list(core.GUARD.UP_SEED)
+        def cost(o):
+            prev, t = up, 0.0
+            for s in o:
+                q = canon[s]; t += max(abs(a - b) for a, b in zip(q, prev)); prev = q
+            return t
+        best = min(itertools.permutations(sids), key=cost)
+        return list(best), cost(best)
+
+    def _violation(self, doc, sts):
+        gl, gw = core.PHYS_FOOT_LEN + 0.18, core.PHYS_FOOT_WID + 0.18
+        m = doc["robot_mount"]
+        foot = [core._obb_corners(s["pose"]["x"], s["pose"]["y"], s["pose"]["yaw"], gl, gw) for s in sts]
+        bk = 2 * core.DEFAULTS["base_keepout"]
+        base = core._obb_corners(m["x"], m["y"], 0.0, bk, bk)
+        v = 0.0
+        for i in range(len(foot)):
+            v += _obb_pen(foot[i], base)
+            for j in range(i + 1, len(foot)):
+                v += _obb_pen(foot[i], foot[j])
+        return v
+
+    def f(self, z):
+        self.calls += 1
+        z = np.clip(np.asarray(z, float), self.lo, self.hi)
+        doc, sts = self._doc(z)
+        cost = None
+        ok, _ = self.o.is_valid(doc, "fc")
+        if ok and core.layout_quality(doc, "fc")[0]:
+            order, c = self._order_cost(doc)
+            if c is not None:
+                cost = c
+                if c < self.best[0]:
+                    doc["task"] = core.relay_from_order(order)
+                    self.best = (c, doc)
+        if cost is None:
+            cost = PENALTY + VIOL_W * self._violation(doc, sts)
+        self.history.append(cost)
+        return cost
+
+
+def run_sa(obj, seed, budget):
+    rng = np.random.default_rng(seed)
+    # neutral start: base at mount0 (yaw 0) + stations evenly spread in the annulus
+    z = np.empty(obj.n_var)
+    z[0], z[1], z[2] = obj.mount0["x"], obj.mount0["y"], 0.0
+    off = rng.uniform(-math.pi, math.pi)
+    for i in range(obj.n):
+        z[3 + 2 * i] = 0.72
+        z[4 + 2 * i] = (off + i * (2 * math.pi / obj.n) + math.pi) % (2 * math.pi) - math.pi
+    z = np.clip(z, obj.lo, obj.hi)
+    c = obj.f(z); best_z, best_c = z.copy(), c
+    T, t0, cool, stall = 0.5, 0.5, 0.99, 0
+    span = obj.hi - obj.lo
+    while obj.calls < budget:
+        frac = T / t0
+        nz = z.copy()
+        # move base (3 vars) ~15% of the time, else a station's (r,theta)
+        if not obj.fix_base and rng.random() < 0.20:
+            k = rng.integers(3)
+            nz[k] += rng.normal(0, 0.12 * (0.25 + 0.75 * frac) * max(span[k], 1e-6))
+        else:
+            i = rng.integers(obj.n); base = 3 + 2 * i
+            if rng.random() < 0.30 * frac:
+                nz[base] = rng.uniform(obj.lo[base], obj.hi[base])
+                nz[base + 1] = rng.uniform(obj.lo[base + 1], obj.hi[base + 1])
+            else:
+                sc = 0.15 * (0.25 + 0.75 * frac)
+                nz[base] += rng.normal(0, sc * span[base])
+                nz[base + 1] += rng.normal(0, sc * span[base + 1])
+        nz = np.clip(nz, obj.lo, obj.hi)
+        nc = obj.f(nz)
+        if nc - c < 0 or rng.random() < math.exp(-(nc - c) / max(T, 1e-9)):
+            z, c = nz, nc
+        if c < best_c - 1e-9:
+            best_z, best_c, stall = z.copy(), c, 0
+        else:
+            stall += 1
+        if stall >= 45:
+            T = min(t0, T * 4.0); stall = 0; z, c = best_z.copy(), best_c
+        else:
+            T *= cool
+    return best_z, best_c
+
+
+def main():
+    sys.stdout.reconfigure(line_buffering=True)
+    n_specs = int(_arg("n_specs", "6")); base_seed = int(_arg("base_seed", "300"))
+    n = int(_arg("n_stations", "3")); budget = int(_arg("iters", "140"))
+    n_ik = int(_arg("n_ik", "20")); fix_base = _arg("fix_base", "0") != "0"
+    arena_half = float(_arg("arena_half", "0.6"))
+    base_config = _arg("base_config", "config_1") or "config_1"
+    out_dir = os.path.abspath(_arg("out_dir", "") or
+                              os.path.expanduser("~/reconfig_ws/src/reconfig_cell/fullcell_out"))
+    os.makedirs(out_dir, exist_ok=True)
+    if os.path.isfile(base_config):
+        bp = base_config
+    elif os.path.isfile(base_config + ".yaml"):
+        bp = base_config + ".yaml"
+    else:
+        bp = os.path.join(get_package_share_directory("cell_description"), f"{base_config}.yaml")
+    base_doc = yaml.safe_load(open(bp))
+    mount0 = dict(base_doc["robot_mount"])
+
+    rclpy.init()
+    moveit = MoveItPy(node_name="cell_synth")
+    oracle = core.Oracle(moveit)
+    mode = "FIXED-BASE (Phase-1 sanity)" if fix_base else "FULL-CELL (base+stations)"
+    print(f"[fc] {mode}; seeds={n_specs} budget={budget} n_ik={n_ik} arena_half={arena_half} "
+          f"mount0=({mount0['x']:.3f},{mount0['y']:.3f}) out={out_dir}")
+
+    obj = Objective(oracle, base_doc, n, n_ik, mount0, arena_half, fix_base)
+    rows = []
+    for k in range(n_specs):
+        seed = base_seed + k
+        obj.reset()
+        bz, bc = run_sa(obj, seed, budget)
+        if obj.best[1] is not None:
+            disp = math.hypot(bz[0] - mount0["x"], bz[1] - mount0["y"])
+            dpsi = abs((bz[2] + math.pi) % (2 * math.pi) - math.pi)
+            cfg = os.path.join(out_dir, f"fc_s{seed}_n{n}.yaml")
+            core.write_config_yaml(obj.best[1], cfg, f"full-cell SA seed={seed} cost={bc:.4f} "
+                                   f"base=({bz[0]:.3f},{bz[1]:.3f},{bz[2]:.3f})")
+            rows.append(dict(seed=seed, cost=round(bc, 4), base_x=round(float(bz[0]), 4),
+                             base_y=round(float(bz[1]), 4), base_yaw=round(float(bz[2]), 4),
+                             base_disp_m=round(disp, 4), base_dyaw_rad=round(dpsi, 4),
+                             evals=obj.calls, config=os.path.basename(cfg)))
+            print(f"[fc] seed={seed} cost={bc:.4f} base=({bz[0]:.3f},{bz[1]:.3f},psi={bz[2]:.3f}) "
+                  f"disp={disp:.3f}m dyaw={dpsi:.3f} -> {os.path.basename(cfg)}")
+        else:
+            print(f"[fc] seed={seed} NO feasible config")
+    if rows:
+        tag = "fixedbase" if fix_base else "fullcell"
+        summ = os.path.join(out_dir, f"fullcell_summary_{tag}_n{n}.csv")
+        with open(summ, "w", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=list(rows[0].keys())); w.writeheader(); w.writerows(rows)
+        costs = [r["cost"] for r in rows]; disps = [r["base_disp_m"] for r in rows]
+        print("=" * 70)
+        print(f"  PHASE 2 {mode}: {len(rows)}/{n_specs} feasible, n_stations={n}")
+        print(f"  surrogate cost  : mean {statistics.mean(costs):.3f} "
+              f"+/- {statistics.pstdev(costs):.3f} (min {min(costs):.3f})")
+        print(f"  base displacement: mean {statistics.mean(disps):.3f} m "
+              f"(min {min(disps):.3f}, max {max(disps):.3f})")
+        print(f"  summary -> {summ}")
+        print("=" * 70)
+    core.GUARD._exit(0)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

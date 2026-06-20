@@ -599,7 +599,7 @@ def write_config_yaml(doc, path, provenance):
              "# Drop-in to cell_generator in the LOCKED schema; robot_mount/belt/part are",
              "# copied unchanged from the base config (robot/gripper/world are not touched).",
              f"cell: {{robot: {doc['cell']['robot']}, base_frame: {doc['cell']['base_frame']}}}",
-             f"robot_mount: {{x: {m['x']}, y: {m['y']}, z: {m['z']}}}",
+             f"robot_mount: {{x: {m['x']}, y: {m['y']}, z: {m['z']}, yaw: {m.get('yaw', 0.0)}}}",
              f"belt: {{top_z: {b['top_z']}, inward: {b['inward']}}}",
              f"part: {{name: {p['name']}, geometry: {{type: {p['geometry']['type']}, "
              f"size: {list(p['geometry']['size'])}}}}}",

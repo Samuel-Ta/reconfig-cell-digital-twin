@@ -59,6 +59,7 @@ def launch_setup(context, *args, **kwargs):
     fwd = [f"{n}:={LaunchConfiguration(n).perform(context)}"
            for n in ("k", "n_stations", "seed", "max_attempts", "base_config", "out_dir",
                      "n_specs", "base_seed", "iters", "n_ik",
+                     "fix_base", "arena_half",
                      "quality", "min_gap", "min_ang",
                      "opt_dir", "n_pool", "n_pick",
                      "valset", "n_plans", "planner", "planning_time")]
@@ -87,6 +88,8 @@ def generate_launch_description():
         DeclareLaunchArgument("base_seed", default_value="100"),
         DeclareLaunchArgument("iters", default_value="400"),
         DeclareLaunchArgument("n_ik", default_value="40"),
+        DeclareLaunchArgument("fix_base", default_value="0"),
+        DeclareLaunchArgument("arena_half", default_value="0.6"),
         DeclareLaunchArgument("quality", default_value="1"),
         DeclareLaunchArgument("min_gap", default_value="0.18"),
         DeclareLaunchArgument("min_ang", default_value="50"),
