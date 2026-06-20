@@ -10,6 +10,8 @@ install(PROGRAMS
   scripts/synthesize
   scripts/score_probe
   scripts/optimize
+  scripts/compare_optimizers
+  scripts/plot_compare.py
   scripts/valset
   scripts/motion_probe
   scripts/plot_results.py

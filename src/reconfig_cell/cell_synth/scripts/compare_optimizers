@@ -1,0 +1,545 @@
+#!/usr/bin/env python3
+"""compare_optimizers — fair multi-optimizer comparison on the validated surrogate.
+
+    ros2 launch cell_synth synth.launch.py exe:=compare_optimizers \
+        n_specs:=5 base_seed:=200 n_stations:=3 iters:=300 n_ik:=24 \
+        out_dir:=<dir>
+
+Answers the paper's "why SA?" question HONESTLY: every method below minimizes the SAME
+deterministic joint-travel surrogate, on the SAME continuous decision space, behind the SAME
+validity oracle, under the SAME evaluation budget, over the SAME seeds. Any difference is the
+optimizer, not the setup. We report the TRUE ranking even if SA is not the winner.
+
+Methods (all from established libraries, not hand-rolled):
+  * Random   — uniform-in-box sampling floor (reference).
+  * SA        — simulated annealing on the placement vector (this harness; minimal, on the
+                shared objective so it is apples-to-apples with the others. The PRODUCTION
+                Annealer in synth_core also optimizes visit ORDER; that is the secondary check.)
+  * GA        — pymoo genetic algorithm.
+  * CMA-ES    — the `cma` package (Hansen).
+  * PSO       — pymoo particle swarm.
+  * BO        — scikit-optimize Gaussian-process Bayesian optimization.
+
+FAIRNESS (critical, all enforced here):
+  * Decision space = station (x, y) per station; yaw is DERIVED radial (the facing constraint
+    fixes it — same as the production Annealer, whose only continuous DOF is also (x, y)).
+    Identical box bounds for ALL methods: a 2*r_max square around the robot mount.
+  * Visit ORDER is resolved by the EXISTING brute-force TSP (synth_core), the SAME rule for
+    every method and every candidate -> apples-to-apples on the *placement* problem. Because
+    the surrogate is exactly the joint-travel TSP minimizes, the TSP order is each placement's
+    best order, so no method gains by also searching order. (Secondary check: re-run the
+    production Annealer with order-optimization ON and report whether the ranking changes.)
+  * Validity oracle = Oracle.is_valid + layout_quality (the EXACT gate SA/baseline already
+    use). Invalid candidates get an identical large PENALTY for every method.
+  * Equal evaluation BUDGET: every method is given the same number of objective (surrogate)
+    evaluations. Per method: actual evals are recorded (pymoo may finish a generation).
+  * >= n_specs seeds; we report mean +- std.
+
+Reuses synth_core (Oracle/_canonical_ik/_seedbank/tsp helpers/realize/layout_quality) and the
+generator/guard via it. NOTHING in synth_core, the generator, the guard, or the twin is
+modified — this is a pure new comparison harness.
+"""
+import csv
+import itertools
+import math
+import os
+import statistics
+import sys
+import time
+
+import numpy as np
+import rclpy
+import yaml
+from ament_index_python.packages import get_package_share_directory
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import synth_core as core  # noqa: E402
+
+from moveit.planning import MoveItPy  # noqa: E402
+
+PENALTY = 100.0          # base cost of any invalid candidate (>> any feasible surrogate ~<12)
+VIOL_W = 50.0            # weight on the soft infeasibility gradient (steep enough to guide a
+                         # single SA trajectory toward feasibility, not just population methods)
+R_MIN, R_MAX = 0.60, 0.85  # UR5 reach annulus (matches the production Proposer): the design space
+IK_SEED = 20240615       # fixed canonical-IK seed (matches synth_core defaults) -> determinism
+
+
+def _arg(name, default):
+    pref = f"{name}:="
+    for a in sys.argv[1:]:
+        if a.startswith(pref):
+            return a[len(pref):]
+    return default
+
+
+def _obb_penetration(a, b):
+    """SAT penetration depth of two oriented rectangles (0 if disjoint). Used only to give
+    infeasible candidates a smooth 'how-overlapping' magnitude; the boolean feasibility
+    decision is the oracle's, not this."""
+    best = float("inf")
+    for ax, ay in core._axes(a) + core._axes(b):
+        amin = min(px * ax + py * ay for px, py in a)
+        amax = max(px * ax + py * ay for px, py in a)
+        bmin = min(px * ax + py * ay for px, py in b)
+        bmax = max(px * ax + py * ay for px, py in b)
+        ov = min(amax, bmax) - max(amin, bmin)
+        if ov <= 0:
+            return 0.0
+        best = min(best, ov)
+    return best
+
+
+# ───────────────────────────── the shared objective ─────────────────────────────────
+class Objective:
+    """f(x) over the placement vector x = [r1,th1, r2,th2, ...] in POLAR coordinates around
+    the robot mount: per station a radius r in [R_MIN, R_MAX] and a bearing th in [-pi, pi].
+    This is the SAME physical decision space (station placement) as the production Annealer's
+    continuous DOF, but parameterized over the REACHABLE annulus so feasibility is dense (a
+    cartesian box is mostly unreachable corners + center -> nearly all penalty, which would
+    measure init luck, not the optimizer). It imposes NO layout/spread assumption: bearings
+    are free over the full circle; only the physical non-overlap/gap oracle rejects clusters.
+
+    One call = one budgeted surrogate evaluation. Resolves order by brute-force TSP (shared
+    rule), gates with the real oracle, returns surrogate_det (or PENALTY). Records the
+    call-ordered cost history so each method's convergence curve (best-so-far vs #evals) can
+    be reconstructed."""
+
+    def __init__(self, oracle, base_doc, n_stations, n_ik):
+        self.o = oracle
+        self.base = base_doc
+        self.n = n_stations
+        self.n_ik = n_ik
+        self.mount = base_doc["robot_mount"]
+        self.lo = np.array([R_MIN, -math.pi] * n_stations, dtype=float)
+        self.hi = np.array([R_MAX, math.pi] * n_stations, dtype=float)
+        self.n_var = 2 * n_stations
+        self.seedbank = oracle._seedbank(n_ik, IK_SEED)   # fixed bank -> deterministic score
+        self.reset()
+
+    def reset(self):
+        self.calls = 0
+        self.history = []        # cost at each call, in call order (running-min -> convergence)
+        self.best = (float("inf"), None)
+
+    # build a schema doc from a polar placement vector; yaw derived radial (facing constraint)
+    def _stations(self, x):
+        mx, my = self.mount["x"], self.mount["y"]
+        sts = []
+        for i in range(self.n):
+            r, th = float(x[2 * i]), float(x[2 * i + 1])
+            sx, sy = mx + r * math.cos(th), my + r * math.sin(th)
+            yaw = math.atan2(-(sy - my), -(sx - mx))      # belt faces the robot (radial)
+            sts.append({"id": f"conveyor_{i + 1}",
+                        "pose": {"x": round(sx, 6), "y": round(sy, 6), "yaw": round(yaw, 6)}})
+        return sts
+
+    def _doc(self, stations, order):
+        return core.doc_from_state(self.base, stations, order)
+
+    # --- soft infeasibility measure (geometry only; the ORACLE stays the feasibility
+    # authority — this just orders infeasible points so the optimizers get a gradient toward
+    # the feasible region instead of a flat penalty plateau). Sums SAT penetration depth of
+    # gap-inflated conveyor footprints against each other and the robot base keep-out, plus a
+    # radial encroachment term. Always strictly less than the PENALTY offset, so no infeasible
+    # point can ever outrank a feasible one. ---
+    def _violation(self, stations):
+        m = self.mount
+        gl = core.PHYS_FOOT_LEN + 0.18                    # gap-inflated footprint (min_gap)
+        gw = core.PHYS_FOOT_WID + 0.18
+        bk = 2 * core.DEFAULTS["base_keepout"]
+        foot = [core._obb_corners(s["pose"]["x"], s["pose"]["y"], s["pose"]["yaw"], gl, gw)
+                for s in stations]
+        base = core._obb_corners(m["x"], m["y"], 0.0, bk, bk)
+        v = 0.0
+        for i in range(len(foot)):
+            v += _obb_penetration(foot[i], base)
+            for j in range(i + 1, len(foot)):
+                v += _obb_penetration(foot[i], foot[j])
+        return v
+
+    # fused order+cost from ONE canonical-IK pass (reuses Oracle._canonical_ik) -> the
+    # brute-force TSP order AND its surrogate cost, without solving IK twice.
+    def _order_and_cost(self, doc):
+        _, task_spec, _ = core.realize(core.make_cell(doc))
+        targ = {}
+        for op in task_spec.get("ops", []):
+            targ.setdefault(op["station"], core._to_pose(op["target_pose"]))
+        sids = list(targ.keys())
+        canon = {s: self.o._canonical_ik(targ[s], self.seedbank) for s in sids}
+        if any(v is None for v in canon.values()):
+            return None, None
+        up = list(core.GUARD.UP_SEED)
+
+        def cost(order):
+            prev, tot = up, 0.0
+            for s in order:
+                q = canon[s]
+                tot += max(abs(a - b) for a, b in zip(q, prev))
+                prev = q
+            return tot
+
+        best = min(itertools.permutations(sids), key=cost)   # brute-force TSP (shared rule)
+        return list(best), cost(best)
+
+    def f(self, x):
+        self.calls += 1
+        x = np.clip(np.asarray(x, dtype=float), self.lo, self.hi)
+        stations = self._stations(x)
+        ident = [s["id"] for s in stations]
+        doc = self._doc(stations, ident)
+        cost = None
+        ok, _ = self.o.is_valid(doc, "cmp")
+        if ok and core.layout_quality(doc, "cmp")[0]:
+            order, c = self._order_and_cost(doc)
+            if c is not None:
+                cost = c
+                if c < self.best[0]:
+                    self.best = (c, self._doc(stations, order))
+        if cost is None:                                 # infeasible -> soft penalty (gradient)
+            cost = PENALTY + VIOL_W * self._violation(stations)
+        self.history.append(cost)
+        return cost
+
+
+# ───────────────────────────── shared annulus initialization ────────────────────────
+# The polar decision space already confines every candidate to the reachable annulus, so all
+# methods share identical, neutral starting knowledge. Single-point methods (CMA-ES, SA) take
+# one evenly-spaced seed point; population methods (GA, PSO, BO) and the Random floor take a
+# uniform annulus-sampled population/design. No spread is imposed — bearings are free.
+def annulus_layout(n, seed, radius=0.72):
+    """One neutral polar seed point: n stations at evenly-spaced bearings (per-seed global
+    rotation), mid-annulus radius. For the single-point methods (CMA-ES x0, SA start)."""
+    rng = np.random.default_rng(seed)
+    off = rng.uniform(-math.pi, math.pi)
+    x = []
+    for i in range(n):
+        th = (off + i * (2 * math.pi / n) + math.pi) % (2 * math.pi) - math.pi
+        x += [radius, th]
+    return np.array(x, dtype=float)
+
+
+def annulus_samples(n, seed, count):
+    """`count` polar placement vectors: radius sqrt-uniform in [R_MIN,R_MAX] (area-uniform),
+    bearing uniform in [-pi,pi] — the SAME distribution the production Proposer draws. Initial
+    population/design for the population methods, and the sampling pool for the Random floor."""
+    rng = np.random.default_rng(seed)
+    out = np.empty((count, 2 * n), dtype=float)
+    for k in range(count):
+        for i in range(n):
+            out[k, 2 * i] = math.sqrt(R_MIN**2 + rng.random() * (R_MAX**2 - R_MIN**2))
+            out[k, 2 * i + 1] = rng.uniform(-math.pi, math.pi)
+    return out
+
+
+# ───────────────────────────── the optimizers ───────────────────────────────────────
+def run_random(obj, seed, budget):
+    # fair floor: random sampling from the SAME annulus prior the other methods init from
+    # (this is the production Proposer-style baseline used in the paper).
+    for x in annulus_samples(obj.n, seed, budget):
+        obj.f(x)
+
+
+def run_sa(obj, seed, budget):
+    """Minimal SA on the placement vector (continuous only; order via the shared TSP). Same
+    family as the production Annealer but apples-to-apples with GA/CMA/PSO/BO here. Gaussian
+    nudge (on r and bearing) + occasional per-station global resample; geometric cooling with
+    reheats."""
+    rng = np.random.default_rng(seed)
+    x = annulus_layout(obj.n, seed)
+    c = obj.f(x)
+    best_x, best_c = x.copy(), c
+    T, t0, cooling = 0.5, 0.5, 0.99      # T0 scaled to the feasible surrogate spread (~2-3)
+    stall = 0
+    span = obj.hi - obj.lo
+    while obj.calls < budget:
+        frac = T / t0
+        nx = x.copy()
+        i = rng.integers(obj.n)
+        if rng.random() < 0.30 * frac:                 # global resample of one station
+            nx[2 * i] = rng.uniform(obj.lo[2 * i], obj.hi[2 * i])
+            nx[2 * i + 1] = rng.uniform(obj.lo[2 * i + 1], obj.hi[2 * i + 1])
+        else:                                          # local nudge, shrinks as it cools
+            scale = 0.15 * (0.25 + 0.75 * frac)
+            nx[2 * i] += rng.normal(0, scale * span[2 * i])
+            nx[2 * i + 1] += rng.normal(0, scale * span[2 * i + 1])
+        nx = np.clip(nx, obj.lo, obj.hi)
+        nc = obj.f(nx)
+        d = nc - c
+        if d < 0 or rng.random() < math.exp(-d / max(T, 1e-9)):
+            x, c = nx, nc
+        if c < best_c - 1e-9:
+            best_x, best_c, stall = x.copy(), c, 0
+        else:
+            stall += 1
+        if stall >= 45:                                # reheat from best to escape a basin
+            T = min(t0, T * 4.0); stall = 0; x, c = best_x.copy(), best_c
+        else:
+            T *= cooling
+
+
+def run_cma(obj, seed, budget):
+    import cma
+    x0 = annulus_layout(obj.n, seed)
+    # CMA-ES is scale-sensitive; r-span is 0.25 but bearing-span is 2*pi. Normalize via
+    # per-coordinate scaling so a step is comparable in both. sigma0 ~ 0.25 of the smaller span.
+    scales = list((obj.hi - obj.lo) / 2.0)
+    es = cma.CMAEvolutionStrategy(
+        list(x0), 0.25,
+        {"bounds": [list(obj.lo), list(obj.hi)], "maxfevals": budget, "CMA_stds": scales,
+         "seed": int(seed) % (2**31 - 1), "verbose": -9})
+    while not es.stop() and obj.calls < budget:
+        xs = es.ask()
+        es.tell(xs, [obj.f(x) for x in xs])
+
+
+def _pymoo_run(obj, seed, budget, algorithm):
+    from pymoo.core.problem import ElementwiseProblem
+    from pymoo.optimize import minimize
+    from pymoo.termination.max_eval import MaximumFunctionCallTermination
+
+    class P(ElementwiseProblem):
+        def __init__(s):
+            super().__init__(n_var=obj.n_var, n_obj=1, xl=obj.lo, xu=obj.hi)
+
+        def _evaluate(s, x, out, *a, **k):
+            out["F"] = obj.f(x)
+
+    minimize(P(), algorithm, MaximumFunctionCallTermination(budget), seed=int(seed),
+             verbose=False)
+
+
+POP = 20
+
+
+def run_ga(obj, seed, budget):
+    from pymoo.algorithms.soo.nonconvex.ga import GA
+    x0 = annulus_samples(obj.n, seed, POP)                   # annulus initial population
+    _pymoo_run(obj, seed, budget, GA(pop_size=POP, sampling=x0))
+
+
+def run_pso(obj, seed, budget):
+    from pymoo.algorithms.soo.nonconvex.pso import PSO
+    x0 = annulus_samples(obj.n, seed, POP)                   # annulus initial swarm
+    _pymoo_run(obj, seed, budget, PSO(pop_size=POP, sampling=x0))
+
+
+def run_bo(obj, seed, budget):
+    from skopt import gp_minimize
+    n_init = min(15, budget)
+    x0 = [list(v) for v in annulus_samples(obj.n, seed, n_init)]  # annulus design
+    dims = [(float(lo), float(hi)) for lo, hi in zip(obj.lo, obj.hi)]
+    gp_minimize(lambda x: obj.f(x), dims, n_calls=budget, x0=x0, n_initial_points=0,
+                random_state=int(seed) % (2**31 - 1))
+
+
+METHODS = [("Random", run_random), ("SA", run_sa), ("GA", run_ga),
+           ("CMA-ES", run_cma), ("PSO", run_pso), ("BO", run_bo)]
+
+
+# ───────────────────────────── secondary check: production SA, order-opt ON ──────────
+def run_prod_sa(oracle, base_doc, seed, n_stations, n_ik, budget):
+    """The existing synth_core.Annealer: optimizes station placement AND visit order jointly
+    (with reheating). Used only to note whether letting SA search ORDER too changes the
+    ranking. iters set so its accepted-state budget is comparable; evals are reported."""
+    ann = core.Annealer(oracle, base_doc, seed=seed, n_stations=n_stations,
+                        iters=budget, n_ik=n_ik)
+    t0 = time.time()
+    res = ann.run()
+    return res["best_cost"], res["evals"], time.time() - t0
+
+
+# ───────────────────────────── metrics ──────────────────────────────────────────────
+def running_min(hist):
+    out, m = [], float("inf")
+    for c in hist:
+        m = min(m, c)
+        out.append(m)
+    return out
+
+
+def evals_to_threshold(hist, thr):
+    rm = running_min(hist)
+    for i, m in enumerate(rm):
+        if m <= thr:
+            return i + 1
+    return None
+
+
+def main():
+    sys.stdout.reconfigure(line_buffering=True)
+    n_specs = int(_arg("n_specs", "5"))
+    base_seed = int(_arg("base_seed", "200"))
+    n_stations = int(_arg("n_stations", "3"))
+    budget = int(_arg("iters", "300"))            # reuse `iters` arg as the eval BUDGET
+    n_ik = int(_arg("n_ik", "24"))
+    base_config = _arg("base_config", "config_1") or "config_1"
+    out_dir = os.path.abspath(_arg("out_dir", "") or
+                              os.path.expanduser("~/reconfig_ws/src/reconfig_cell/opt_compare"))
+    methods_arg = _arg("methods", "")             # optional CSV subset, e.g. methods:=SA,GA
+    do_secondary = _arg("secondary", "1") != "0"
+    os.makedirs(out_dir, exist_ok=True)
+
+    if os.path.isfile(base_config):
+        base_path = base_config
+    elif os.path.isfile(base_config + ".yaml"):
+        base_path = base_config + ".yaml"
+    else:
+        base_path = os.path.join(get_package_share_directory("cell_description"),
+                                 f"{base_config}.yaml")
+    with open(base_path) as f:
+        base_doc = yaml.safe_load(f)
+
+    selected = METHODS
+    if methods_arg:
+        want = [m.strip() for m in methods_arg.split(",")]
+        selected = [m for m in METHODS if m[0] in want]
+
+    rclpy.init()
+    moveit = MoveItPy(node_name="cell_synth")
+    oracle = core.Oracle(moveit)
+    print(f"[cmp] oracle up; methods={[m[0] for m in selected]} seeds={n_specs} "
+          f"budget={budget} n_ik={n_ik} n_stations={n_stations} out={out_dir}")
+
+    obj = Objective(oracle, base_doc, n_stations, n_ik)
+    # records[method] = list over seeds of dict(best, evals, wall, history)
+    records = {name: [] for name, _ in selected}
+    for k in range(n_specs):
+        seed = base_seed + k
+        for name, fn in selected:
+            obj.reset()
+            t0 = time.time()
+            fn(obj, seed, budget)
+            wall = time.time() - t0
+            records[name].append(dict(best=obj.best[0], evals=obj.calls,
+                                      wall=wall, history=list(obj.history),
+                                      best_doc=obj.best[1]))
+            print(f"[cmp] seed={seed} {name:7s} best={obj.best[0]:.4f} "
+                  f"evals={obj.calls} wall={wall:.1f}s")
+
+    # global threshold = within 5% of the best feasible cost any method found anywhere
+    all_best = [r["best"] for rs in records.values() for r in rs if r["best"] < PENALTY]
+    thr = (min(all_best) * 1.05) if all_best else PENALTY
+    print(f"[cmp] threshold (1.05 x global-best) = {thr:.4f}")
+
+    # ---- per-method summary table ----
+    summary_rows = []
+    for name, _ in selected:
+        rs = records[name]
+        bests = [r["best"] for r in rs]
+        feas = [b for b in bests if b < PENALTY]
+        e2t = [evals_to_threshold(r["history"], thr) for r in rs]
+        e2t_hit = [e for e in e2t if e is not None]
+        walls = [r["wall"] for r in rs]
+        ev = [r["evals"] for r in rs]
+        row = dict(
+            method=name,
+            best_mean=round(statistics.mean(feas), 4) if feas else float("nan"),
+            best_std=round(statistics.pstdev(feas), 4) if len(feas) > 1 else 0.0,
+            best_min=round(min(feas), 4) if feas else float("nan"),
+            feasible_seeds=f"{len(feas)}/{len(rs)}",
+            evals_mean=round(statistics.mean(ev), 1),
+            e2t_mean=round(statistics.mean(e2t_hit), 1) if e2t_hit else float("nan"),
+            e2t_hit=f"{len(e2t_hit)}/{len(rs)}",
+            wall_mean_s=round(statistics.mean(walls), 2),
+        )
+        summary_rows.append(row)
+        print(f"  {name:7s} best={row['best_mean']}±{row['best_std']} (min {row['best_min']}, "
+              f"feas {row['feasible_seeds']}) e2t={row['e2t_mean']} ({row['e2t_hit']}) "
+              f"wall={row['wall_mean_s']}s")
+
+    summ_path = os.path.join(out_dir, f"compare_summary_n{n_stations}.csv")
+    with open(summ_path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(summary_rows[0].keys()))
+        w.writeheader(); w.writerows(summary_rows)
+
+    # ---- convergence curves: mean best-so-far vs #evals, per method ----
+    conv_path = os.path.join(out_dir, f"compare_convergence_n{n_stations}.csv")
+    L = budget
+    with open(conv_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["eval"] + [f"{name}_mean" for name, _ in selected]
+                   + [f"{name}_std" for name, _ in selected])
+        curves = {}
+        for name, _ in selected:
+            rms = []
+            for r in records[name]:
+                rm = running_min(r["history"])[:L]
+                if len(rm) < L:                      # pad short runs with their final value
+                    rm = rm + [rm[-1]] * (L - len(rm)) if rm else [PENALTY] * L
+                rms.append(rm)
+            arr = np.array(rms)
+            curves[name] = (arr.mean(axis=0), arr.std(axis=0))
+        for i in range(L):
+            w.writerow([i + 1] + [round(curves[n][0][i], 5) for n, _ in selected]
+                       + [round(curves[n][1][i], 5) for n, _ in selected])
+
+    # ---- per-seed convergence (running-min per seed): one column per method x seed, with
+    # still-infeasible points (running-min >= PENALTY) written as blank so the plotter can
+    # take a median/IQR over only the FEASIBLE seeds (a never-feasible seed, e.g. Random or a
+    # failed GA run, must not drag the curve up to ~100). The reported summary table is
+    # unaffected — this is only for a clean convergence figure. ----
+    seed_path = os.path.join(out_dir, f"compare_seedcurves_n{n_stations}.csv")
+    seeds = [base_seed + k for k in range(n_specs)]
+    cols = [(name, s) for name, _ in selected for s in seeds]
+    with open(seed_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["eval"] + [f"{name}_s{s}" for name, s in cols])
+        permethod = {}
+        for name, _ in selected:
+            rows_rm = []
+            for r in records[name]:
+                rm = running_min(r["history"])[:L]
+                if len(rm) < L:
+                    rm = rm + [rm[-1]] * (L - len(rm)) if rm else [PENALTY] * L
+                rows_rm.append(rm)
+            permethod[name] = rows_rm
+        for i in range(L):
+            cells = []
+            for name, _ in selected:
+                for si in range(n_specs):
+                    v = permethod[name][si][i]
+                    cells.append("" if v >= PENALTY else round(v, 5))
+            w.writerow([i + 1] + cells)
+
+    # ---- save the best config each method found (drop-in YAML) ----
+    for name, _ in selected:
+        rs = records[name]
+        bi = min(range(len(rs)), key=lambda i: rs[i]["best"])
+        if rs[bi]["best_doc"] is not None:
+            p = os.path.join(out_dir, f"best_{name.replace('-', '').lower()}_n{n_stations}.yaml")
+            core.write_config_yaml(rs[bi]["best_doc"], p,
+                                   f"{name} best over seeds, cost={rs[bi]['best']:.4f}")
+
+    # ---- secondary check: production SA with ORDER optimization on ----
+    if do_secondary:
+        sec = []
+        for k in range(n_specs):
+            seed = base_seed + k
+            bc, ev, wall = run_prod_sa(oracle, base_doc, seed, n_stations, n_ik, budget)
+            sec.append(dict(seed=seed, best=round(bc, 4), evals=ev, wall_s=round(wall, 2)))
+            print(f"[cmp] secondary prod-SA(order-opt) seed={seed} best={bc:.4f} "
+                  f"evals={ev} wall={wall:.1f}s")
+        sbest = [s["best"] for s in sec]
+        sec_path = os.path.join(out_dir, f"compare_secondary_prodSA_n{n_stations}.csv")
+        with open(sec_path, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(sec[0].keys()))
+            w.writeheader(); w.writerows(sec)
+        print(f"[cmp] secondary prod-SA(order-opt): best={statistics.mean(sbest):.4f}"
+              f"±{statistics.pstdev(sbest):.4f} (min {min(sbest):.4f}) -> {sec_path}")
+
+    print("=" * 78)
+    ranked = sorted([r for r in summary_rows if r["best_mean"] == r["best_mean"]],
+                    key=lambda r: r["best_mean"])
+    print("  FAIR OPTIMIZER COMPARISON on the deterministic surrogate "
+          f"(n_stations={n_stations}, {n_specs} seeds, budget={budget})")
+    print("  ranking by mean best surrogate cost (lower = better):")
+    for i, r in enumerate(ranked):
+        print(f"    {i+1}. {r['method']:7s} {r['best_mean']}±{r['best_std']}")
+    print(f"  summary     : {summ_path}")
+    print(f"  convergence : {conv_path}")
+    print("=" * 78)
+    core.GUARD._exit(0)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
