@@ -1,0 +1,17 @@
+label,surrogate,source,config
+val_0_n3,4.666,sa_s548_n3.yaml,val_0_n3.yaml
+val_2_n3,4.8564,sa_s517_n3.yaml,val_2_n3.yaml
+val_4_n3,4.9592,sa_s541_n3.yaml,val_4_n3.yaml
+val_6_n3,5.0298,sa_s503_n3.yaml,val_6_n3.yaml
+val_8_n3,5.1449,sa_s513_n3.yaml,val_8_n3.yaml
+val_10_n3,5.3857,rand41544,val_10_n3.yaml
+val_12_n3,5.8738,rand34026,val_12_n3.yaml
+val_14_n3,6.1077,rand3407,val_14_n3.yaml
+val_15_n3,6.2295,rand31720,val_15_n3.yaml
+val_17_n3,6.3842,sa_s532_n3.yaml,val_17_n3.yaml
+val_19_n3,6.7137,rand31726,val_19_n3.yaml
+val_21_n3,7.0828,sa_s538_n3.yaml,val_21_n3.yaml
+val_23_n3,7.6869,rand23165,val_23_n3.yaml
+val_25_n3,8.3315,rand13623,val_25_n3.yaml
+val_27_n3,9.3312,rand39138,val_27_n3.yaml
+val_29_n3,17.0083,rand35893,val_29_n3.yaml

@@ -1,0 +1,16 @@
+# SYNTHESIZED by cell_synth (Rung 1). SA seed=536 cost=4.8261 order=['conveyor_2', 'conveyor_3', 'conveyor_1']
+# Drop-in to cell_generator in the LOCKED schema; robot_mount/belt/part are
+# copied unchanged from the base config (robot/gripper/world are not touched).
+cell: {robot: ur5_rg2, base_frame: base_link}
+robot_mount: {x: -0.697, y: -0.643, z: 0.4, yaw: 0.0}
+belt: {top_z: 0.7, inward: 0.27}
+part: {name: cube_1, geometry: {type: box, size: [0.04, 0.04, 0.04]}}
+stations:
+  - {id: conveyor_1, type: conveyor, pose: {x: -0.61343, y: -1.340319, yaw: 1.690072}}
+  - {id: conveyor_2, type: conveyor, pose: {x: -1.552802, y: -0.245467, yaw: -0.434859}}
+  - {id: conveyor_3, type: conveyor, pose: {x: -0.308524, y: -0.003748, yaw: -2.116861}}
+task:
+  - {op: pick,  from: conveyor_2}
+  - {op: place, to:   conveyor_3}
+  - {op: pick,  from: conveyor_3}
+  - {op: place, to:   conveyor_1}

@@ -27,10 +27,11 @@ def launch_setup(context, *args, **kwargs):
     bringup_pkg = get_package_share_directory("cell_bringup")
     controllers_yaml = os.path.join(bringup_pkg, "config", "ur5_rg2_controllers.yaml")
 
+    ur_type = LaunchConfiguration("ur_type").perform(context)   # Phase 3: ur5 | ur10 ...
     moveit_config = (
         MoveItConfigsBuilder(robot_name="ur", package_name="cell_bringup")
         .robot_description(file_path="urdf/ur5_rg2_arm.urdf.xacro",
-                           mappings={"name": "ur", "ur_type": "ur5", "tf_prefix": "",
+                           mappings={"name": "ur", "ur_type": ur_type, "tf_prefix": "",
                                      "simulation_controllers": controllers_yaml})
         .robot_description_semantic(file_path="config/moveit/ur5_rg2.srdf")
         .robot_description_kinematics(file_path="config/moveit/kinematics.yaml")
@@ -90,6 +91,7 @@ def generate_launch_description():
         DeclareLaunchArgument("n_ik", default_value="40"),
         DeclareLaunchArgument("fix_base", default_value="0"),
         DeclareLaunchArgument("arena_half", default_value="0.6"),
+        DeclareLaunchArgument("ur_type", default_value="ur5"),
         DeclareLaunchArgument("quality", default_value="1"),
         DeclareLaunchArgument("min_gap", default_value="0.18"),
         DeclareLaunchArgument("min_ang", default_value="50"),
