@@ -384,10 +384,21 @@ The preceding results use a handful of seeds on a UR5. We now test whether the a
 generalizes across many configurations and across robot arms. Per the base-pose finding, the base
 is fixed at the arena-center mount for both robots.
 
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figs/phase3_gen.png}
+\caption{Generalization across 50 seeds and two robot arms. (a)~Optimized-cost distribution.
+(b)~Per-seed improvement of simulated annealing over the equal-budget random baseline (sorted);
+SA wins $46/50$ (UR5) and $45/50$ (UR10). (c,d)~Surrogate vs.\ real RRTstar motion at scale
+($n=16$, median estimator) for UR5 (full planning budget) and UR10 (reduced budget); fit lines
+shown, bootstrap statistics in Table~\ref{tab:corr}.}
+\label{fig:gen}
+\end{figure}
+
 \textbf{Scale.} On each of fifty seeds, simulated annealing against the surrogate beats the
 equal-budget random-valid baseline: $46/50$ for the UR5 (mean $-9.2\%$) and $45/50$ for a UR10
 (mean $-7.3\%$), with optimized-cost distributions of $4.99\pm0.16$ and $4.85\pm0.26$ respectively
-(Table~\ref{tab:scale}, Fig.~\ref{fig:scale}). Simulated annealing reliably beats random across
+(Table~\ref{tab:scale}, Fig.~\ref{fig:gen}). Simulated annealing reliably beats random across
 fifty seeds on both arms.
 
 \textbf{Multi-robot transfer.} The UR10 is introduced by a single \texttt{ur\_type} parameter: the
@@ -397,7 +408,7 @@ kinematics and hence the surrogate. The arena, annulus, and task are identical t
 
 \textbf{Real-motion correlation at scale.} We validate sixteen configurations per robot against the
 real RRTstar planner, spanning the surrogate range, with bootstrap $95\%$ confidence intervals
-(Table~\ref{tab:corr}, Fig.~\ref{fig:transfer}). The surrogate correlates with real motion on
+(Table~\ref{tab:corr}, Fig.~\ref{fig:gen}). The surrogate correlates with real motion on
 \emph{both} arms, both intervals excluding zero: UR10 Pearson $r=0.828$ $[0.62,0.95]$, Spearman
 $\rho=0.791$ $[0.41,0.96]$; UR5 $r=0.694$ $[0.31,0.93]$, $\rho=0.574$ $[0.04,0.88]$. At scale we use
 the \emph{median} planned duration as the estimator rather than the minimum: the median is noisier
@@ -435,24 +446,6 @@ UR5 & $0.694$ $[0.31,\,0.93]$ & $0.574$ $[0.04,\,0.88]$ \\
 \bottomrule
 \end{tabular}
 \end{table}
-
-\begin{figure*}[t]
-\centering
-\includegraphics[width=0.78\textwidth]{figs/phase3_scale.png}
-\caption{Generalization across 50 seeds and two arms. Left: optimized-cost distribution for UR5
-and UR10. Right: per-seed improvement of simulated annealing over the equal-budget random baseline
-(sorted); SA beats random on $46/50$ (UR5) and $45/50$ (UR10) seeds.}
-\label{fig:scale}
-\end{figure*}
-
-\begin{figure*}[t]
-\centering
-\includegraphics[width=0.78\textwidth]{figs/phase3_transfer.png}
-\caption{Surrogate vs.\ real RRTstar motion time at scale ($n=16$ per robot, median estimator).
-The surrogate correlates with real motion on both arms (UR5 full planning budget, UR10 reduced
-budget); fit lines and bootstrap statistics in Table~\ref{tab:corr}.}
-\label{fig:transfer}
-\end{figure*}
 
 \section{High-Fidelity Twin Execution}
 \label{sec:twin}
