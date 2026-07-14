@@ -2,7 +2,11 @@
 \IEEEoverridecommandlockouts
 
 \usepackage{cite}
-\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{amsmath}
+% Times (New) Roman for text and math, per the IEEE template (10 pt Times).
+% newtx replaces Computer Modern and provides the AMS symbols itself.
+\usepackage{newtxtext}
+\usepackage{newtxmath}
 \usepackage{algorithmic}
 \usepackage{graphicx}
 \usepackage{textcomp}
@@ -58,16 +62,10 @@ United Arab Emirates\\
 H00539891@hct.ac.ae}
 }
 
-% First-page copyright notice, placed exactly as in the template (bottom of the
-% left column, page 1). Placeholder Xs as in the template; the publisher/EDAS
-% fills in the real ISBN/copyright line for the camera-ready version.
-\IEEEpubid{\makebox[\columnwidth]{XXX-X-XXXX-XXXX-X/XX/\$XX.00~\copyright20XX~IEEE \hfill}
-\hspace{\columnsep}\makebox[\columnwidth]{}}
-
 \maketitle
-\IEEEpubidadjcol
 
 \begin{abstract}
+\bfseries
 Evaluating candidate layouts of a robotic pick-and-place cell conventionally requires a
 sampling-based motion plan in a high-fidelity simulator---slow and stochastic. We present a
 declarative reconfigurable-cell framework (ROS\,2, Gazebo, MoveIt\,2; UR5\,+\,RG2) whose
