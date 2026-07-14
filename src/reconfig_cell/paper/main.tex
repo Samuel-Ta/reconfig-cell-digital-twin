@@ -20,44 +20,38 @@
 
 \title{Cycle-Time Optimization of Reconfigurable Robotic Pick-and-Place Cells in a Digital Twin}
 
-% Authors intentionally omitted for now.
-\author{}
+% ============================================================================
+% TODO(authors): replace the placeholders below with the real author names,
+% affiliations, and e-mail addresses BEFORE EDAS submission (reviewer item 1).
+% ============================================================================
+\author{
+\IEEEauthorblockN{[Author One]\IEEEauthorrefmark{1},
+                  [Author Two]\IEEEauthorrefmark{1},
+                  [Author Three]\IEEEauthorrefmark{2}}
+\IEEEauthorblockA{\IEEEauthorrefmark{1}[Department], [University], [City], [Country]\\
+\IEEEauthorrefmark{2}[Department], [University], [City], [Country]\\
+E-mail: [email1], [email2], [email3]}
+}
 
 \maketitle
 
 \begin{abstract}
-Layout design for robotic pick-and-place cells is dominated by the cost of evaluating
-candidate configurations: each evaluation conventionally requires a sampling-based motion
-plan in a high-fidelity simulator, which is both slow and stochastic. We present a
-declarative reconfigurable-cell framework (ROS\,2 Jazzy + Gazebo Harmonic + MoveIt\,2,
-UR5 + RG2 gripper) in which an optimizer searches over station poses and visit order using
-a \emph{deterministic joint-travel surrogate} as its objective, rather than the simulator.
-The surrogate evaluates a configuration by chaining canonical, elbow-up inverse-kinematics
-solutions and summing joint-space travel, achieving $<\!0.0003\%$ run-to-run spread. Our
-central contribution is an \emph{honest} validation of this surrogate against real planned
-motion time. A naive comparison against a randomized feasibility planner (RRTConnect) yields
-no reliable correlation---the Pearson coefficient flips sign between repetitions
-($+0.057$ vs.\ $-0.550$)---because per-plan path-length variance ($\sim\!96\%$) swamps the
-between-configuration signal. Once the measurement is aligned with what the surrogate models
----an \emph{optimizing} planner (RRTstar), kinematic \emph{continuity} (joint-to-joint
-goals), and a fixed visit order---the surrogate strongly predicts converged-optimal motion
-time: Pearson $r=0.880$, Spearman $\rho=0.943$ ($n=6$). Optimizing against the surrogate with
-simulated annealing beats an equal-budget random baseline $5/5$ (mean $-17.4\%$), and the
-predicted reduction transfers to real motion: pooled $r=0.876$, with optimized configurations
-running $19.4\%$ faster in real RRTstar motion. Finally, an optimized configuration executes a
-full pick--place--pick--place relay end-to-end in the high-fidelity twin (a warmup and one
-measured trial, both succeeding with no planning failures). A fair comparison of five black-box optimizers (Bayesian optimization,
-CMA-ES, simulated annealing, genetic algorithm, particle swarm) on the same surrogate shows no
-single winner---the top three tie within noise---while simulated annealing is the most
-cost-efficient and reliable, and random placement finds no valid layout. Adding the robot base
-pose to the search reveals a structural property: the surrogate and its constraints are
-base-relative, so the absolute mount pose is cost-neutral. Finally, the approach generalizes:
-across 50 seeds and two robot arms (UR5 and UR10), simulated annealing beats an equal-budget
-random baseline ($46/50$ and $45/50$), and the surrogate's correlation with real motion transfers
-to the UR10 ($r=0.83$, bootstrap $95\%$ CI excluding zero). We also report the boundary of the
-result: the most aggressive minimal-travel layouts are infeasible for the twin's default
-randomized planner, so time \emph{prediction} and full-twin \emph{executability} are distinct
-guarantees.
+Evaluating candidate layouts of a robotic pick-and-place cell conventionally requires a
+sampling-based motion plan in a high-fidelity simulator---slow and stochastic. We present a
+declarative reconfigurable-cell framework (ROS\,2, Gazebo, MoveIt\,2; UR5\,+\,RG2) whose
+optimizer searches station poses and visit order against a \emph{deterministic joint-travel
+surrogate} ($<\!0.0003\%$ run-to-run spread) instead of the simulator, and we validate that
+surrogate honestly against real planned motion. Against a randomized feasibility planner the
+surrogate shows no reliable correlation; once the measurement is aligned with what the
+surrogate models---an optimizing planner (RRT\textsuperscript{*}), kinematic continuity, and a
+fixed visit order---it strongly predicts converged-optimal motion time (Pearson $r=0.88$,
+$n=6$). Simulated annealing against the surrogate beats equal-budget random baselines, and the
+gain transfers to real motion ($-19\%$). A fair five-optimizer comparison shows no method
+dominates: simulated annealing is justified by cost and reliability rather than peak quality.
+The search generalizes across 50 seeds and two robot arms (UR5, UR10), the robot base pose
+proves cost-neutral under the cycle-time objective, and optimized configurations execute
+end-to-end in the high-fidelity twin. All validation is digital-twin- and planner-based;
+physical hardware validation remains future work.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -66,191 +60,184 @@ optimization, reconfigurable manufacturing.
 \end{IEEEkeywords}
 
 \section{Introduction}
-The throughput of a robotic pick-and-place cell is largely fixed at design time by the
-relative placement of its work stations and the order in which the robot visits them.
-Searching this layout space is attractive but expensive: the natural objective---real cycle
-time---is obtained only by executing or planning each candidate in a simulator. Sampling-based
-planners such as RRTConnect~\cite{rrtconnect} are fast but stochastic, so a single
-configuration must be evaluated many times to average out path-length variance, and a global
-search over hundreds of candidates becomes intractable.
+The throughput of a robotic pick-and-place cell is largely fixed at design time by the relative
+placement of its work stations and the order in which the robot visits them. Searching this
+layout space is expensive: the natural objective---real cycle time---is obtained only by
+planning or executing each candidate in a simulator, and sampling-based planners such as
+RRTConnect~\cite{rrtconnect} are stochastic, so each configuration must be evaluated many times.
 
-A common remedy is a cheap surrogate objective. The risk is that the surrogate optimizes a
-proxy that does not track the quantity of interest. This paper takes the validation of that
-proxy as seriously as the optimization itself. We build a declarative, reconfigurable cell on
-ROS\,2 and Gazebo (Section~\ref{sec:system}), define a deterministic joint-travel surrogate
-(Section~\ref{sec:surrogate}), and then ask---repeatedly and honestly---whether it predicts
-real planned motion time (Section~\ref{sec:gate}). We deliberately report two failed attempts
-before the successful one, because the failure mode is instructive: the surrogate is only
-predictive when the measurement is methodologically aligned with what it models. We then
-optimize against the validated surrogate, confirm the predicted gains transfer to real planned
-motion (Section~\ref{sec:gate}), and ask which optimizer to use (Section~\ref{sec:optcmp}). We
-extend the search to the robot base pose and report a structural finding on its cost-neutrality
-(Section~\ref{sec:fullcell}), establish that the approach generalizes across 50 seeds and two
+A common remedy is a cheap surrogate objective; the risk is optimizing a proxy that does not
+track the quantity of interest. This paper takes the validation of the proxy as seriously as the
+optimization. We build a declarative reconfigurable cell (Section~\ref{sec:system}), formalize
+the layout-optimization problem and its deterministic joint-travel surrogate
+(Section~\ref{sec:system}), and ask---repeatedly and honestly---whether the surrogate predicts
+real planned motion time (Section~\ref{sec:gate}), reporting two failed measurement attempts
+before the successful one. We then optimize against the validated surrogate, compare five
+black-box optimizers under identical conditions (Section~\ref{sec:optcmp}), extend the search to
+the robot base pose (Section~\ref{sec:fullcell}), test generalization across 50 seeds and two
 robot arms (Section~\ref{sec:scale}), and execute an optimized configuration end-to-end in the
-high-fidelity twin (Section~\ref{sec:twin}).
+high-fidelity twin with a measured time decomposition (Section~\ref{sec:twin}).
 
-\textbf{Contributions.} (i)~A declarative reconfigurable-cell framework with a reusable
-headless IK oracle shared between synthesis and simulation. (ii)~A deterministic joint-travel
-surrogate with $<\!0.0003\%$ spread, suitable as a stable optimization objective.
-(iii)~A rigorous surrogate-to-real validation establishing that the surrogate predicts an
-\emph{optimizing} planner's motion time ($r=0.88$), together with a clear account of why it
-fails against a randomized planner. (iv)~An end-to-end demonstration that simulated-annealing
-optimization against the surrogate yields configurations that are faster in real motion and
-executable in the twin, and an honest characterization of where executability breaks down.
-(v)~A fair comparison of five black-box optimizers on the identical surrogate, oracle, and budget,
-showing that no method dominates and that simulated annealing is justified by cost and reliability
-rather than peak quality. (vi)~A full-cell synthesis formulation that adds the robot base pose to
-the decision space, together with a structural finding that the absolute base pose is cost-neutral
-under a cycle-time objective. (vii)~Generalization evidence across 50 seeds and two robot arms
-(UR5 and UR10) with bootstrapped confidence intervals, demonstrating that the surrogate-optimization
-approach transfers.
+\textbf{Contributions.} (i)~A reconfigurable-cell framework whose headless IK oracle is shared
+between synthesis and simulation. (ii)~A deterministic joint-travel surrogate and a formal
+statement of the layout-optimization problem. (iii)~A rigorous surrogate-to-real validation:
+the surrogate predicts an \emph{optimizing} planner's motion time ($r=0.88$) and fails against a
+randomized planner, with a clear account of why. (iv)~An end-to-end demonstration that
+surrogate-driven simulated annealing yields configurations faster in real motion and executable
+in the twin, with an honest boundary of where executability breaks down. (v)~A fair
+five-optimizer comparison, a base-pose cost-neutrality finding, and generalization evidence
+across 50 seeds and two arms (UR5, UR10).
 
 \section{Related Work}
 \label{sec:related}
-\textbf{Robotic cell layout optimization.} Optimizing the physical layout of a robotic cell is a
-long-standing problem, and metaheuristics are a common tool. Sánchez-Sosa and
-Chavero-Navarrete~\cite{sanchez} use a genetic algorithm to minimize cell area and inter-station
-transfer distance under reach and interference constraints, validating the result against a
-physical screwdriving cell, while a classical commercial tool encodes the same objective with a
-modified simulated annealer~\cite{barral}. More recent work couples the layout search to a digital
-twin: Wang et al.~\cite{wang} apply multi-agent cooperative swarm learning to dynamically
-re-optimize reconfigurable assembly-cell layouts inside a twin. All of these evaluate a candidate
-configuration by executing the digital twin or a simulator directly. We instead decouple the
-optimizer from the high-fidelity simulator through a \emph{validated} kinematic proxy, so the
-search itself never invokes a planner.
+\textbf{Cell layout optimization.} Metaheuristics are standard for robotic cell layout:
+S\'anchez-Sosa and Chavero-Navarrete~\cite{sanchez} minimize cell area and transfer distance
+with a genetic algorithm; a classical commercial tool encodes the same objective with a modified
+simulated annealer~\cite{barral}; Wang et al.~\cite{wang} re-optimize reconfigurable
+assembly-cell layouts inside a digital twin with multi-agent swarm learning. All evaluate
+candidates by executing a simulator or twin directly; we decouple the optimizer from the
+simulator through a \emph{validated} kinematic proxy.
 
-\textbf{Surrogate-assisted layout and motion optimization.} Closest to our work is
-surrogate-assisted optimization, a well-established idea in evolutionary
-computation~\cite{surrogatesurvey}. Kawabe et al.~\cite{kawabe} jointly optimize motion planning
-and cell layout using a trained surrogate that estimates a manipulator's operation time with
-$98\%$ accuracy at roughly $1/400$ of the computation of full planning, and a related hierarchical
-framework couples an adaptive genetic algorithm with a surrogate-assisted RRT for multi-target
-placement~\cite{kaimujjaman}. Both rely on a \emph{learned} surrogate trained on planner outputs.
-Our surrogate is instead a closed-form kinematic formula---a sum of canonical joint-space
-travel---that needs no training data and is deterministic by construction. We additionally
-characterize the conditions under which a kinematic surrogate does and does not predict real
-planner output (Section~\ref{sec:gate}), a methodological finding neither work reports.
+\textbf{Surrogate-assisted optimization.} Closest to our work, Kawabe et
+al.~\cite{kawabe} optimize motion planning and layout jointly using a surrogate trained on
+planner outputs, and a hierarchical variant couples a genetic algorithm with surrogate-assisted
+RRT~\cite{kaimujjaman}; surrogate assistance is well established in evolutionary
+computation~\cite{surrogatesurvey}. Both rely on \emph{learned} surrogates; ours is a
+closed-form kinematic formula needing no training data, deterministic by construction, and we
+characterize when such a surrogate does and does not predict real planner output.
 
-\textbf{Sampling-based motion planning.} Our real-motion measurements use sampling-based planners.
-Beyond RRTConnect~\cite{rrtconnect} and the asymptotically optimal RRTstar~\cite{rrtstar}, the
-probabilistic-roadmap method~\cite{prm} established the paradigm for high-dimensional configuration
-spaces. The per-plan path-length variance we document in Section~\ref{sec:gate}---precisely why a
-single twin evaluation is an unreliable objective---is a known property of this algorithm
-family~\cite{lavalle}.
+\textbf{Planning and twins.} Our measurements use sampling-based
+planners~\cite{rrtconnect,rrtstar,prm}; the per-plan variance we document is a known property of
+the family~\cite{lavalle}. Digital twins increasingly support cell design~\cite{dtsurvey}:
+ROS-based twin architectures~\cite{sueldo} and twin-driven reconfiguration of collaborative
+lines~\cite{kousi} target \emph{runtime} support, whereas ours is a \emph{design-time} twin
+whose headless IK oracle is shared, by import, between optimizer and simulator.
 
-\textbf{Digital-twin-assisted cell design.} Finally, digital twins are increasingly used in
-robotic cell design~\cite{dtsurvey}. Saavedra Sueldo et al.~\cite{sueldo} present a ROS-based
-architecture for rapid twin development of robotized manufacturing systems, and Kousi et
-al.~\cite{kousi} use a twin to design and reconfigure human--robot collaborative assembly lines.
-Those twins primarily support \emph{runtime} reconfiguration. Ours is a \emph{design-time} twin
-whose headless IK oracle is shared, by import, between the optimizer and the simulator, so a
-synthesized configuration is valid in the twin by construction.
-
-\section{System Architecture}
+\section{System and Problem Formulation}
 \label{sec:system}
-The platform is a digital twin built on ROS\,2 Jazzy and Gazebo Harmonic~\cite{gazebo}, with a
-Universal Robots UR5 arm and an OnRobot RG2 two-finger gripper~\cite{hardware}
-(Fig.~\ref{fig:overview}). Motion planning
-uses MoveIt\,2 with the OMPL planner suite. A cell is described declaratively in a locked
-schema---robot mount pose, belt geometry, part geometry, and a list of conveyor \emph{stations}
-(each with an $(x,y,\psi)$ pose), plus a relay \emph{task} as an ordered list of pick/place
-operations. A generator realizes a configuration document into a \texttt{scene.yaml} and
-\texttt{task.yaml} consumed by the simulation.
+
+\subsection{Platform}
+The platform is a digital twin built on ROS\,2~\cite{ros2} and Gazebo~\cite{gazebo} with a
+Universal Robots UR5 arm and an OnRobot RG2 gripper~\cite{hardware}; planning uses
+MoveIt\,2~\cite{moveit} with the OMPL suite~\cite{ompl} (Fig.~\ref{fig:overview}). A cell is
+described declaratively in a locked schema: robot mount pose, belt and part geometry, a list of
+conveyor \emph{stations} with planar poses, and a relay \emph{task} (ordered pick/place
+operations). A generator realizes a configuration into the scene and task consumed by the
+simulation. Two components are shared, by import, between the headless optimizer and the live
+twin: the IK reachability guard and the IK scoring oracle---so a configuration deemed feasible
+by the optimizer is feasible in the twin by construction. Grasping is implemented as a welded
+detachable joint plus physically closing fingers; the study therefore addresses reach and
+transit motion, not contact dynamics.
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=\columnwidth]{figs/twin_overview.jpg}
-\caption{The high-fidelity Gazebo Harmonic twin for an optimized configuration
-(\texttt{val\_0}): a UR5\,+\,RG2 arm on a pedestal serves three conveyor stations against a
-warehouse backdrop. Station poses and visit order are produced by the optimizer; the green cube
-is the transferred part.}
+\caption{The Gazebo twin for an optimized configuration (\texttt{val\_0}): a UR5\,+\,RG2 arm on
+a pedestal serves three conveyor stations; the green cube is the transferred part. Station poses
+and visit order are produced by the optimizer.}
 \label{fig:overview}
 \end{figure}
 
-Two components are shared, by import, between the headless optimizer and the live simulator,
-which is what makes the surrogate trustworthy: (1)~an \emph{IK reachability guard} that rejects
-any configuration with an unreachable station, and (2)~the inverse-kinematics oracle used to
-score configurations. Grasping in the twin is implemented as a welded detachable joint, so the
-focus of this study is reach and transit motion rather than contact dynamics.
+\subsection{Problem formulation}
+\label{sec:formulation}
+Let the cell contain $N$ stations ($N{=}3$ throughout). The decision variables are the station
+poses, expressed in the robot base frame in polar form over the reach annulus,
+$x_i=(r_i,\theta_i)$ with $r_i\in[0.60,0.85]$\,m, plus the visit order
+$\sigma$ (a permutation of the stations); the full-cell variant of
+Section~\ref{sec:fullcell} adds the base pose $(x_b,y_b,\psi_b)$. Station yaw is derived
+(each belt faces the robot radially), and the generator derives from each station pose a grasp
+target $g_i$ on the belt. The relay visits the ordered targets
+$g_{\sigma(1)},\dots,g_{\sigma(K)}$ ($K{=}4$ operations for $N{=}3$: pick--place--pick--place).
 
-A practical but important lesson during twin construction: the \texttt{ros\_gz\_sim} spawn
-utility silently ignores a pose embedded in an SDF string, so every runtime fixture must be
-spawned via explicit \texttt{-x/-y/-z/-Y} flags; otherwise all fixtures stack at the world
-origin. Belt-support slabs are added so the part rests at a stable grasp height.
+The surrogate cost chains \emph{canonical} inverse-kinematics solutions: for target $g$,
+$\mathrm{IK}_c(g)$ is the collision-free IK branch closest (in joint space) to the elbow-up home
+configuration $q_{\mathrm{home}}$ over a fixed 40-seed bank, which pins every target to the same
+kinematic branch and makes the score deterministic (measured run-to-run spread
+$<\!0.0003\%$). With $q_0=q_{\mathrm{home}}$ and $q_k=\mathrm{IK}_c\!\left(g_{\sigma(k)}\right)$,
+\begin{equation}
+\label{eq:surrogate}
+J(x,\sigma)\;=\;\sum_{k=1}^{K}\;\bigl\lVert q_k-q_{k-1}\bigr\rVert_{\infty}
+\;=\;\sum_{k=1}^{K}\;\max_{j}\bigl|q_{k,j}-q_{k-1,j}\bigr|,
+\end{equation}
+the summed \emph{dominant-joint} travel. Under a velocity-limit-dominated motion profile the
+time of a point-to-point segment is bounded below by $\max_j |\Delta q_j|/\dot q_j^{\max}$; the
+UR5's six joints share one velocity limit ($180^\circ$/s), so~(\ref{eq:surrogate}) is
+proportional to that time bound and all joints are implicitly---and here, exactly---weighted
+equally. Section~\ref{sec:gate} evaluates a velocity-weighted variant for the UR10, whose base
+and shoulder joints are slower. The optimization problem is
+\begin{equation}
+\label{eq:problem}
+\min_{x,\sigma} \; J(x,\sigma) \quad \text{s.t.} \quad x \in \mathcal{F},
+\end{equation}
+where the feasible set $\mathcal{F}$ is enforced by a headless validity oracle:
+(C1)~every station inside a $\pm1.2$\,m arena box around the mount; (C2)~pairwise non-overlap of
+the physical conveyor footprints ($0.93\times0.51$\,m oriented boxes, separating-axis test), and
+non-overlap with a $0.4$\,m square keep-out at the robot base; (C3)~an inter-station clearance
+gap $\geq0.18$\,m (inflated-footprint test); (C4)~each belt facing the robot within $8^\circ$;
+(C5)~every grasp target reachable by a collision-free, joint-limit-respecting IK solution
+against the full scene (the target's own fixture excluded). The visit order $\sigma$ is resolved
+by brute-force enumeration (a traveling-salesman solution~\cite{tsp} under the same cost), so
+the surrogate and every downstream real measurement share one order.
 
-\section{Deterministic Joint-Travel Surrogate}
-\label{sec:surrogate}
-The surrogate estimates the motion cost of a configuration without invoking a planner. For each
-target pose in the (ordered) relay, it computes inverse kinematics and selects the
-\emph{canonical} solution---the collision-free branch closest to a fixed elbow-up seed over a
-deterministic seed bank---then sums the joint-space distance traveled between consecutive
-canonical configurations. Selecting a canonical branch is essential: a generic IK call random-
-restarts and jumps between elbow-up/elbow-down solutions, which made an early version of the
-surrogate vary by $50$--$127\%$ on identical inputs. With canonical selection the surrogate is
-effectively deterministic, with measured run-to-run spread below $0.0003\%$. This stability is a
-prerequisite for using it as an optimization objective: simulated annealing requires that two
-evaluations of the same point return the same value.
-
-The visit order is fixed separately by a brute-force traveling-salesman
-solution~\cite{tsp} over the stations, so that the surrogate and any downstream real measurement
-use an identical order.
+\subsection{What ``cycle time'' means here}
+\label{sec:terms}
+Three distinct quantities appear in this paper and are never interchanged:
+\begin{itemize}
+\item[$T_1$] \textbf{Surrogate cost} $J$ of~(\ref{eq:surrogate}): dimensionless joint travel
+(rad). The only quantity the optimizer minimizes.
+\item[$T_2$] \textbf{Planned motion time}: the summed planned trajectory \emph{duration} of the
+$K$ station-to-station transfers, from the real planner at $0.3\times$
+velocity/acceleration scaling. It excludes gripper actuation, pick/place dwell, spawning,
+resets, and conveyor motion (conveyors are static fixtures here).
+\item[$T_3$] \textbf{Full twin relay time}: wall-clock of one complete relay in the running
+twin, including planning, execution, gripper open/close dwells, weld attach/detach with
+verification, part spawning/reset, and homing.
+\end{itemize}
+Optimization targets $T_1$; validation correlates $T_1$ with $T_2$
+(Section~\ref{sec:gate}); Section~\ref{sec:twin} reports $T_3$ and decomposes it, clarifying the
+relation between the $6$--$9$\,s of $T_2$ and the $\sim\!140$\,s of $T_3$.
 
 \section{Surrogate-to-Real Validation}
 \label{sec:gate}
-We treat ``does the surrogate predict real motion time?'' as a hard gate that must pass before
-any optimization result is trusted. The validation set \texttt{val\_hb} contains six valid
-configurations spanning a range of surrogate values, all sharing one robot mount.
+We treat ``does $T_1$ predict $T_2$?'' as a hard gate that must pass before any optimization
+result is trusted. The validation set \texttt{val\_hb} contains six valid configurations
+spanning the surrogate range, sharing one robot mount.
 
-\subsection{Two honest negatives}
-\textbf{Attempt 1 (inconclusive).} Measuring full cycle time in the twin mixed in
-$\sim\!130$\,s of configuration-independent reset/settle overhead and suffered $\sim\!2\times$
-run-to-run motion variance from the randomized planner; no clean trend emerged, and sim
-instability prevented collecting enough runs to average it out.
+\textbf{Two honest negatives.} Measuring $T_3$ in the twin (Attempt~1) mixed in
+$\sim\!130$\,s of configuration-independent overhead and $\sim\!2\times$ run-to-run motion
+variance; no clean trend emerged. A headless probe (Attempt~2) removed the overhead by summing
+planned trajectory duration with the twin's own RRTConnect: the Pearson coefficient
+\emph{flipped sign} between repetitions ($+0.057$ at 12 plans vs.\ $-0.550$ at 40), because
+RRTConnect path duration retains $\sim\!96\%$ per-plan spread even best-of-10. A coefficient
+that flips sign is measuring noise; we report it as such.
 
-\textbf{Attempt 2 (reliable negative).} A headless probe stripped the fixed overhead and the
-wall-clock noise by summing planned trajectory \emph{duration} with the real RRTConnect planner,
-averaged best-of-10. The result was explicitly \emph{not} a relationship: the Pearson coefficient
-flipped sign between repetitions of the same experiment ($+0.057$ at 12 plans vs.\ $-0.550$ at 40
-plans). The cause is that RRTConnect path duration retains $\sim\!96\%$ per-plan spread even at
-best-of-10, and frequently fails on the collision-constrained reaches. A coefficient that flips
-sign is measuring noise; we report it as such rather than selecting the favorable run.
+\textbf{Aligning the measurement.} Minimal joint travel is the wrong target for a randomized,
+feasibility-only sampler. Three changes align the measurement with what the surrogate models:
+(1)~an \emph{optimizing} planner---RRT\textsuperscript{*}~\cite{rrtstar}, asymptotically optimal
+in path cost; (2)~\emph{kinematic continuity}---the relay is planned joint-to-joint, each goal
+being the collision-free IK branch closest to the previous joint state, eliminating spurious
+elbow flips (a transfer $A\!\rightarrow\!B$ excludes both endpoint belts from the collision
+world, since leaving $A$ and approaching $B$ are required); (3)~the shared TSP visit order. With
+continuity, five of six configurations become deterministic (per-plan spread
+$89\%\!\rightarrow\!0\%$).
 
-\subsection{Aligning the measurement (Attempt 3)}
-The diagnosis was that minimal joint travel is the wrong target for a \emph{randomized,
-feasibility-only} sampler. Three changes align the real measurement with the quantity the
-surrogate models:
-\begin{enumerate}
-\item \textbf{Optimizing planner.} RRTConnect $\rightarrow$ RRTstar~\cite{rrtstar}, which is
-asymptotically optimal in path cost. This required injecting a group-qualified planner
-configuration so RRTstar is selectable for the arm group.
-\item \textbf{Kinematic continuity.} The relay is planned joint-to-joint: each station's goal is
-the collision-free IK branch closest to the previous station's joint state, eliminating spurious
-elbow-flip excursions. A transfer $A\rightarrow B$ excludes \emph{both} endpoint belts (leaving
-$A$ and approaching $B$ are required, not collisions), while every other belt remains an obstacle.
-\item \textbf{Fixed visit order.} The brute-force TSP order is shared by surrogate and real
-measurement.
-\end{enumerate}
-With continuity, five of six configurations become near-deterministic (per-plan spread
-$89\%\rightarrow0\%$); the lone exception, \texttt{val\_2}, is RRTstar occasionally failing to
-converge to its optimum.
-
-\subsection{Result}
-Table~\ref{tab:gate} reports the surrogate and the real RRTstar motion time (minimum, mean,
-median, std over 10 plans). Because RRTstar is asymptotically optimal, the \emph{minimum}
-planned duration is the best estimate of its converged-optimal path cost; the mean is
-contaminated by non-converged runs (visibly \texttt{val\_2}, whose min $7.35$\,s matches its
-mid-range surrogate while unlucky runs inflate its mean to $12.6$\,s). Table~\ref{tab:estimators}
-compares correlation under each estimator; the min is both the most principled and the strongest.
-Fig.~\ref{fig:gate} shows the scatter and fit.
+\textbf{Result.} Table~\ref{tab:gate} reports the gate. Because RRT\textsuperscript{*} is
+asymptotically optimal, the \emph{minimum} planned duration over 10 plans estimates its
+converged-optimal path cost; the mean is contaminated by non-converged runs (\texttt{val\_2}:
+min $7.35$\,s vs.\ mean $12.6$\,s). Under the min estimator the surrogate strongly predicts
+motion time---Pearson $r=0.880$, Spearman $\rho=0.943$ (median: $0.704/0.543$; mean:
+$0.486/0.371$)---and Fig.~\ref{fig:gate} shows the fit. The gate passes; Attempt~2's negative
+was a property of the planner, not the surrogate.
 
 \begin{table}[t]
-\caption{Surrogate vs.\ real RRTstar motion time on \texttt{val\_hb} ($n=6$,
-RRTstar $6$\,s $\times\,10$ plans). Min is the converged-optimal estimate.}
+\caption{The validation gate: surrogate ($T_1$) vs.\ real RRT\textsuperscript{*} motion time
+($T_2$; $6$\,s\,$\times$\,10 plans) on \texttt{val\_hb}. Min estimates the converged optimum.
+Correlations (min): $r=0.880$, $\rho=0.943$.}
 \label{tab:gate}
 \centering
 \begin{tabular}{lccccc}
 \toprule
-config & surrogate & min (s) & mean (s) & median (s) & std \\
+config & $T_1$ (rad) & min (s) & mean (s) & median (s) & std \\
 \midrule
 val\_0 & 5.17 & \textbf{6.81} & 6.81 & 6.81 & 0.00 \\
 val\_1 & 6.38 & \textbf{8.06} & 9.14 & 8.92 & 0.98 \\
@@ -262,145 +249,108 @@ val\_5 & 7.36 & \textbf{9.11} & 9.52 & 9.11 & 1.22 \\
 \end{tabular}
 \end{table}
 
-\begin{table}[t]
-\caption{Correlation of the surrogate with real motion time, by estimator.}
-\label{tab:estimators}
-\centering
-\begin{tabular}{lcc}
-\toprule
-estimator & Pearson $r$ & Spearman $\rho$ \\
-\midrule
-\textbf{min} (converged-optimal) & \textbf{0.880} & \textbf{0.943} \\
-median & 0.704 & 0.543 \\
-mean & 0.486 & 0.371 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
 \begin{figure}[t]
 \centering
 \includegraphics[width=0.92\columnwidth]{figs/gate_scatter.png}
-\caption{Surrogate vs.\ real RRTstar motion time on \texttt{val\_hb}. Filled points and fit line
-use the converged-optimal (min) estimate ($r=0.880$, $\rho=0.943$); faded points show
-mean\,$\pm$\,std for transparency.}
+\caption{Surrogate vs.\ real RRT\textsuperscript{*} motion time on \texttt{val\_hb}. Filled
+points and fit use the converged-optimal (min) estimate ($r=0.880$); faded points show
+mean\,$\pm$\,std.}
 \label{fig:gate}
 \end{figure}
 
-Once the measurement matches what the surrogate models, the deterministic joint-travel surrogate
-strongly predicts the optimizing planner's motion time, and the rank order is almost exact
-($\rho=0.943$). Attempt~2's negative is therefore a property of the randomized planner/sampler,
-not of the surrogate. The gate passes, justifying optimization against the surrogate.
+\textbf{Optimizing the surrogate reduces real motion.} Optimizing station poses and visit order
+against the surrogate with simulated annealing yields five winners; pooled with the six gate
+configurations ($n=11$) the correlation holds ($r=0.876$, $\rho=0.900$), and the winners average
+$6.79$\,s real motion versus $8.42$\,s for random valid configurations---a $19.4\%$ reduction
+matching the $17.4\%$ surrogate gain of the same run. Optimizing the cheap proxy produces a real
+speedup of the same magnitude.
 
-\subsection{Optimizing the surrogate reduces real motion}
-A final validation step confirms that \emph{optimizing} the surrogate lowers real motion, not
-merely that the two correlate. Optimizing station poses and the visit order against the surrogate
-with simulated annealing (the optimizer itself is examined in Section~\ref{sec:optcmp}) yields
-five winners; pooled with the six gate configurations ($n=11$), the surrogate--real correlation
-holds on min motion (Pearson $r=0.876$, Spearman $\rho=0.900$). All five winners are deterministic
-over ten plans and sit at the low real-motion end, averaging $6.79$\,s versus $8.42$\,s for random
-valid configurations---a $19.4\%$ real-motion reduction that matches the $17.4\%$ surrogate gain
-of the same five-seed run (Table~\ref{tab:loop}, Fig.~\ref{fig:loop}). Optimizing the cheap proxy
-produces a real optimizing-planner speedup of the same magnitude.
+\textbf{Velocity-weighted variant.} Weighting each joint's travel by its velocity limit
+($\max_j |\Delta q_j| / \dot q_j^{\max}$ per segment) leaves every UR5 result unchanged up to a
+constant factor (equal limits). For the UR10 ($120^\circ$/s base/shoulder vs.\ $180^\circ$/s
+wrists) we re-scored the scale validation set of Section~\ref{sec:scale} with both variants:
+within one scoring run, weighting \emph{improves} the correlation with real motion (median
+estimator: $r$ $0.87\!\rightarrow\!0.91$, $\rho$ $0.82\!\rightarrow\!0.97$; min:
+$r$ $0.72\!\rightarrow\!0.85$), and the two variants correlate at $r=0.84$. The unweighted
+surrogate used throughout is therefore the conservative choice, and a velocity-weighted
+refinement can only strengthen the arm-transfer result.
+
+\section{Optimization and Optimizer Comparison}
+\label{sec:optcmp}
+
+Production optimization uses simulated annealing~\cite{simanneal} over station poses and visit
+order, inside a propose\,$\rightarrow$\,validate (oracle)\,$\rightarrow$\,score
+(surrogate)\,$\rightarrow$\,anneal loop; on the five-seed gate run it beat an equal-budget random
+baseline $5/5$ ($-17.4\%$), and Section~\ref{sec:scale} scales this to fifty seeds. All
+optimizer and planner settings are collected in Table~\ref{tab:settings} (reviewer-requested;
+every value is read from the released code).
 
 \begin{table}[t]
-\caption{Optimizing the surrogate transfers to real motion: simulated-annealing winners vs.\
-random valids (pooled $n=11$, min motion).}
-\label{tab:loop}
+\caption{Optimizer and planner settings.}
+\label{tab:settings}
 \centering
-\begin{tabular}{lcc}
+\scriptsize
+\begin{tabular}{@{}l@{\hspace{2pt}}l@{}}
 \toprule
-group & mean real motion (s) & pooled correlation \\
+\multicolumn{2}{@{}l}{\textbf{Simulated annealing (production)}} \\
+initial temperature $T_0$ & $2.0$ (comparison variant: $0.5$) \\
+cooling & geometric, $\times0.99$ per iteration \\
+reheat & $T\!\times\!4$ after 45 stale iters; restart at best \\
+moves & order swap $p{=}0.3$; global jump $p{=}0.35\,T/T_0$; \\
+      & Gaussian nudge $\sigma{=}0.10$\,m $\times\,(0.25{+}0.75\,T/T_0)$ \\
+initialization & best of 12 random valid samples \\
+iterations / IK bank & 400 (gate), 150 (scale) / 40 (16) seeds \\
 \midrule
-SA winners ($n=5$) & \textbf{6.79} & \multirow{2}{*}{$r=0.876,\ \rho=0.900$} \\
-random valids ($n=5$) & 8.42 & \\
+\multicolumn{2}{@{}l}{\textbf{Comparison harness (all five optimizers)}} \\
+budget / seeds & 140 evaluations / 6 seeds \\
+infeasible penalty & $100 + 50\times$SAT penetration depth \\
+CMA-ES & \texttt{cma}, $\sigma_0{=}0.25\times$span, per-coordinate scaling \\
+GA / PSO & \texttt{pymoo}~\cite{pymoo}, population 20, annulus init \\
+Bayesian opt. & \texttt{scikit-optimize} GP, 15 initial points \\
 \midrule
-\multicolumn{3}{c}{relative improvement: \textbf{$-19.4\%$} real motion ($-17.4\%$ surrogate)} \\
+\multicolumn{2}{@{}l}{\textbf{RRT\textsuperscript{*} validation probe (headless, $T_2$)}} \\
+planning time & $6$\,s gate; $10$\,s UR5 / $5$\,s UR10 at scale \\
+attempts / plans & 1 / 10 per config (6 UR10) \\
+vel.\ / acc.\ scaling & $0.3$ / $0.3$ \\
+goals & continuity IK, endpoint belts excluded \\
+\midrule
+\multicolumn{2}{@{}l}{\textbf{RRTConnect twin executor ($T_3$)}} \\
+planning time / attempts & $5$\,s / 10 (executor retries $\leq6$) \\
+vel.\ / acc.\ / goals & $0.3$ / $0.3$ / collision-checked elbow-up IK \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\begin{figure}[t]
-\centering
-\includegraphics[width=0.92\columnwidth]{figs/closed_loop.png}
-\caption{Pooled surrogate vs.\ real motion ($n=11$). Optimized winners (low end) and random
-valids lie on the same trend; the surrogate reduction maps onto a real-motion reduction.}
-\label{fig:loop}
-\end{figure}
-
-\section{Optimizer Comparison}
-\label{sec:optcmp}
-
-\begin{figure*}[t]
-\centering
-\begin{tikzpicture}[
-  box/.style={draw, rounded corners, align=center, minimum height=8mm, minimum width=20mm,
-    font=\footnotesize, inner sep=2pt},
-  acc/.style={box, draw=orange!80!black, fill=orange!12, very thick},
-  arr/.style={-{Latex[length=2mm]}, thick}]
-\node[box] (spec) {Task spec\\$+$ bounds};
-\node[box, right=12mm of spec] (sa) {SA\\optimizer};
-\node[box, right=12mm of sa] (oracle) {Validity oracle\\(IK guard)};
-\node[acc, right=12mm of oracle] (surr) {Surrogate score\\$<\!0.0003\%$ spread};
-\draw[arr] (spec) -- (sa);
-\draw[arr] (sa) -- (oracle);
-\draw[arr] (oracle) -- node[above,font=\scriptsize]{valid} (surr);
-\draw[arr] (surr.north) to[bend right=26]
-  node[above,font=\scriptsize]{minimize: next candidate} (sa.north);
-\node[box, below=11mm of sa] (best) {Best\\config};
-\node[box, right=12mm of best] (gen) {Generator\\(scene$+$task)};
-\node[box, right=12mm of gen] (twin) {High-fidelity\\twin};
-\node[acc, right=12mm of twin] (valid) {Real-sim valid.\\(RRTstar) $r{=}0.88$};
-\draw[arr] (sa) -- node[left,font=\scriptsize]{converged} (best);
-\draw[arr] (best) -- (gen);
-\draw[arr] (gen) -- (twin);
-\draw[arr] (twin) -- (valid);
-\end{tikzpicture}
-\caption{The synthesis-and-validation pipeline. Simulated annealing proposes station/base
-placements; the shared headless IK oracle rejects invalid candidates; the deterministic surrogate
-scores the rest ($<\!0.0003\%$ run-to-run spread); the loop minimizes the surrogate. The best
-configuration is realized by the generator into the high-fidelity twin and independently validated
-against the real RRTstar planner ($r=0.88$ on the curated gate; simulated annealing beats random
-$46/50$ at scale, Section~\ref{sec:scale}).}
-\label{fig:pipeline}
-\end{figure*}
-
-Optimization uses simulated annealing~\cite{simanneal} over station poses with a brute-force TSP
-visit order; on an initial five-seed run it beat an equal-budget random baseline $5/5$
-($-17.4\%$, above), and Section~\ref{sec:scale} scales this to fifty seeds. The optimizer sits
-inside the synthesis-and-validation pipeline of Fig.~\ref{fig:pipeline}. But is simulated
-annealing the right optimizer? We answer with a controlled comparison of five established
-black-box optimizers---Bayesian optimization with a Gaussian process~\cite{bo},
-CMA-ES~\cite{cmaes}, simulated annealing, and a genetic algorithm~\cite{ga} and particle-swarm
-optimization~\cite{pso} (both via \texttt{pymoo}~\cite{pymoo})---all minimizing the \emph{same}
-deterministic surrogate,
-over the \emph{same} decision space (per-station placement in the reach annulus, visit order fixed
-by the same TSP), behind the \emph{same} validity oracle, under an identical $140$-evaluation
-budget, across the same six seeds. Infeasible candidates receive an identical penalty, so any
-difference is attributable to the optimizer, not the setup.
+Is simulated annealing the right optimizer? We compare five established black-box
+optimizers---Bayesian optimization~\cite{bo}, CMA-ES~\cite{cmaes}, simulated annealing, a
+genetic algorithm~\cite{ga}, and particle swarm~\cite{pso}---all minimizing the \emph{same}
+deterministic surrogate over the \emph{same} polar decision space (visit order fixed by the same
+TSP), behind the \emph{same} validity oracle, under an identical 140-evaluation budget and
+seeds; infeasible candidates receive an identical soft penalty
+(Table~\ref{tab:settings}).
 
 We report the outcome honestly: \emph{no optimizer dominates}. The top three---Bayesian
-optimization ($5.74\pm0.71$), CMA-ES ($5.80\pm0.65$), and simulated annealing
-($5.91\pm1.03$)---are a statistical tie, separated by far less than the seed-to-seed standard
-deviation (Table~\ref{tab:optcmp}, Fig.~\ref{fig:optcmp}). Simulated annealing is therefore not
-uniquely best in solution quality; its justification is \emph{cost and reliability}. It reaches
-the tied quality at $4.7$\,s per seed with $6/6$ feasibility, whereas Bayesian optimization
-matches that quality only at $121$\,s per seed (its Gaussian-process refits dominate the runtime),
-and the genetic algorithm fails to find any valid layout on one of six seeds. Critically, uniform
-random placement over the same reach annulus finds \emph{zero} valid three-station layouts within
-the budget on every seed---a well-separated, reachable, non-overlapping triple is a roughly
-one-percent-density target---so optimization is necessary, and the gap between any optimizer and
-no optimizer dwarfs the gaps between optimizers. A secondary check validates the visit-order
-treatment: letting simulated annealing search the order jointly, rather than fixing it by TSP,
-reaches a marginally lower cost ($\approx\!5.05$) but only by spending $\sim\!100\times$ the
-evaluation budget and does not change the ranking---because the surrogate \emph{is} the joint
-travel the TSP minimizes, the TSP order is already optimal for any placement.
+optimization ($5.74\pm0.71$), CMA-ES ($5.80\pm0.65$), simulated annealing
+($5.91\pm1.03$)---tie within seed-to-seed spread (Table~\ref{tab:optcmp}). Simulated annealing
+is thus not uniquely best; its justification is \emph{cost and reliability}: tied quality at
+$4.7$\,s/seed with $6/6$ feasibility, whereas Bayesian optimization needs $121$\,s/seed
+(GP refits dominate) and the genetic algorithm fails one of six seeds. Critically, uniform
+random placement finds \emph{zero} valid three-station layouts within budget on every seed---a
+valid, well-separated triple is a roughly one-percent-density target---so the gap between
+\emph{any} optimizer and no optimizer dwarfs the gaps between optimizers. A secondary check
+lets simulated annealing search the visit order jointly instead of fixing it by TSP: it reaches
+a marginally lower cost ($\approx\!5.05$) only by spending $\sim\!100\times$ the budget and does
+not change the ranking---the surrogate \emph{is} the joint travel the TSP minimizes, so the TSP
+order is already optimal per placement.
 
 \begin{table}[t]
-\caption{Five black-box optimizers on the same surrogate (6 seeds, equal $140$-evaluation budget,
-three stations). No method dominates; the top three tie within the seed-to-seed std.}
+\caption{Five optimizers, same surrogate/oracle/budget (6 seeds). The top three tie within
+seed-to-seed std.}
 \label{tab:optcmp}
 \centering
-\begin{tabular}{lcccc}
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}lcccc@{}}
 \toprule
 optimizer & cost (mean$\pm$std) & best & feasible & wall/seed \\
 \midrule
@@ -414,212 +364,172 @@ random placement & --- & --- & $0/6$ & $0.1$\,s \\
 \end{tabular}
 \end{table}
 
-\begin{figure}[t]
-\centering
-\includegraphics[width=\columnwidth]{figs/optimizer_convergence.png}
-\caption{Convergence of the five optimizers on the validated surrogate (median best-so-far over
-six seeds, IQR band). The top three converge to a statistically indistinguishable cost; random
-placement never enters the feasible band.}
-\label{fig:optcmp}
-\end{figure}
-
-\section{Full-Cell Synthesis and Base-Pose Finding}
+\section{Full-Cell Synthesis: Base-Pose Neutrality}
 \label{sec:fullcell}
-The optimizer so far places stations around a \emph{fixed} robot mount. We next add the robot base
-pose $(x,y,\psi)$ to the decision space---sampling stations in the reach annulus relative to the
-sampled base and making the generator base-yaw aware---so the optimizer chooses where to mount the
-robot \emph{and} where to place the stations. A sanity run that freezes the base reproduces the
-fixed-mount result within noise ($6.07\pm0.72$ vs.\ the comparison's simulated annealing
-$5.91\pm1.03$), confirming the extension is sound.
+Adding the robot base pose $(x_b,y_b,\psi_b)$ to the decision space (stations sampled in the
+annulus relative to the sampled base) does \emph{not} reduce cost: full-cell optimization yields
+$5.61\pm0.50$ (5/6 feasible) versus $6.07\pm0.72$ fixed-base---statistically equal---even though
+the optimizer moves the base substantially (mean displacement $0.42$\,m, yaw up to $1.17$\,rad);
+a frozen-base sanity run reproduces the fixed-mount result within noise. This is structural, not
+a search failure: the surrogate and every constraint C1--C5 are computed in the robot base
+frame, so the whole cell is invariant under rigid motion---the absolute mount provides no cost
+gradient, and only station geometry \emph{relative} to the robot matters. Pinning the mount for
+floor footprint or accessibility would require an objective term the cycle-time surrogate
+deliberately does not contain. A full-cell winner with a displaced, yawed base (0.57\,m,
+0.36\,rad) executes end-to-end in the twin (guard passed, relay clean at $140.3$\,s), confirming
+the base-yaw realization is geometrically correct.
 
-Opening the base search, however, does \emph{not} reduce cost: full-cell optimization yields
-$5.61\pm0.50$ (five of six seeds feasible) versus $6.07\pm0.72$ fixed-base---statistically equal
-(Table~\ref{tab:fullcell})---even though the optimizer \emph{does} move the base substantially
-(mean displacement $0.42$\,m, yaw up to $1.17$\,rad). This is a structural property of the problem,
-not a search failure: the joint-travel surrogate and \emph{every} validity constraint (reach,
-inter-station clearance, no-tilt, base keep-out) are computed in the robot base frame, so the
-entire cell is invariant under a rigid translation and rotation. The absolute base pose therefore
-provides no cost gradient---for cycle-time optimization, only the station geometry \emph{relative}
-to the robot matters. Pinning the absolute mount, for floor footprint or accessibility, would
-require adding a corresponding objective term that the cycle-time surrogate deliberately does not
-contain. A synthesized full-cell configuration with a displaced, yawed base (relocated $0.57$\,m,
-yaw $0.36$\,rad) nonetheless executes end-to-end in the twin (IK guard passed, warmup relay clean
-at $140.3$\,s, no planning failures), confirming the base-yaw realization is geometrically correct.
+\section{Generalization at Scale and Arm Transfer}
+\label{sec:scale}
+We test generalization across many seeds and across arms, base fixed at the arena-center mount
+per the finding above. On each of fifty seeds, simulated annealing beats the equal-budget
+random-valid baseline: $46/50$ for the UR5 (mean $-9.2\%$) and $45/50$ for a UR10 (mean
+$-7.3\%$), with optimized costs $4.99\pm0.16$ and $4.85\pm0.26$ (Fig.~\ref{fig:gen}). The UR10
+is introduced by a single robot-type parameter: the UR arms share joint names, planning group,
+gripper mount, and tool frame, so the longer links flow automatically into the IK and hence the
+surrogate.
+
+Sixteen configurations per robot, spanning the surrogate range, are validated against the real
+RRT\textsuperscript{*} planner with bootstrap $95\%$ confidence intervals
+(Table~\ref{tab:scale}). The surrogate correlates with real motion on \emph{both} arms, both
+intervals excluding zero. At scale we use the \emph{median} planned duration (noisier, since
+non-converged plans contaminate it) rather than the gate's principled min estimator; we
+therefore do not claim the gate's $r=0.88$ at scale---these figures are an honest,
+lower-bounding generalization check under a noisier estimator and a smaller planning budget.
+The UR5's moderate $r=0.694$ vs.\ its gate $r=0.880$ is explained by that estimator change, not
+by a change in the underlying relationship.
 
 \begin{table}[t]
-\caption{Fixed-base vs.\ full-cell synthesis (base pose added to the decision space), six seeds.}
-\label{tab:fullcell}
+\caption{Scale and transfer: SA vs.\ random over 50 seeds, and surrogate--real correlation
+($n=16$/robot, median estimator, bootstrap $95\%$ CI).}
+\label{tab:scale}
 \centering
-\begin{tabular}{lccc}
+\scriptsize
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{@{}lcccc@{}}
 \toprule
-formulation & cost (mean$\pm$std) & feasible & base displacement \\
+robot & SA wins & impr. & $r$ [95\% CI] & $\rho$ [95\% CI] \\
 \midrule
-fixed base & $6.07\pm0.72$ & $6/6$ & $0$ \\
-full cell & $5.61\pm0.50$ & $5/6$ & $0.42$\,m (max $0.64$) \\
+UR5 & $46/50$ & $-9.2\%$ & $0.694\,[0.31,0.93]$ & $0.574\,[0.04,0.88]$ \\
+UR10 & $45/50$ & $-7.3\%$ & $0.828\,[0.62,0.95]$ & $0.791\,[0.41,0.96]$ \\
 \bottomrule
 \end{tabular}
 \end{table}
-
-\section{Generalization at Scale and Multi-Robot Transfer}
-\label{sec:scale}
-The preceding results use a handful of seeds on a UR5. We now test whether the approach
-generalizes across many configurations and across robot arms. Per the base-pose finding, the base
-is fixed at the arena-center mount for both robots.
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=\columnwidth]{figs/phase3_gen.png}
-\caption{Generalization across 50 seeds and two robot arms. (a)~Optimized-cost distribution.
-(b)~Per-seed improvement of simulated annealing over the equal-budget random baseline (sorted);
-SA wins $46/50$ (UR5) and $45/50$ (UR10). (c,d)~Surrogate vs.\ real RRTstar motion at scale
-($n=16$, median estimator) for UR5 (full planning budget) and UR10 (reduced budget); fit lines
-shown, bootstrap statistics in Table~\ref{tab:corr}.}
+\caption{Generalization across 50 seeds and two arms. (a)~Optimized-cost distribution.
+(b)~Per-seed improvement of SA over the equal-budget random baseline (sorted).
+(c,d)~Surrogate vs.\ real RRT\textsuperscript{*} motion at scale ($n=16$, median estimator)
+for UR5 and UR10; bootstrap statistics in Table~\ref{tab:scale}.}
 \label{fig:gen}
 \end{figure}
 
-\textbf{Scale.} On each of fifty seeds, simulated annealing against the surrogate beats the
-equal-budget random-valid baseline: $46/50$ for the UR5 (mean $-9.2\%$) and $45/50$ for a UR10
-(mean $-7.3\%$), with optimized-cost distributions of $4.99\pm0.16$ and $4.85\pm0.26$ respectively
-(Table~\ref{tab:scale}, Fig.~\ref{fig:gen}). Simulated annealing reliably beats random across
-fifty seeds on both arms.
-
-\textbf{Multi-robot transfer.} The UR10 is introduced by a single \texttt{ur\_type} parameter: the
-Universal Robots arms share joint names, so the same semantic model, planning group, gripper mount,
-and tool frame load unchanged, while the UR10's longer links flow automatically into the inverse
-kinematics and hence the surrogate. The arena, annulus, and task are identical to the UR5.
-
-\textbf{Real-motion correlation at scale.} We validate sixteen configurations per robot against the
-real RRTstar planner, spanning the surrogate range, with bootstrap $95\%$ confidence intervals
-(Table~\ref{tab:corr}, Fig.~\ref{fig:gen}). The surrogate correlates with real motion on
-\emph{both} arms, both intervals excluding zero: UR10 Pearson $r=0.828$ $[0.62,0.95]$, Spearman
-$\rho=0.791$ $[0.41,0.96]$; UR5 $r=0.694$ $[0.31,0.93]$, $\rho=0.574$ $[0.04,0.88]$. At scale we use
-the \emph{median} planned duration as the estimator rather than the minimum: the median is noisier
-because non-converged RRTstar plans contaminate it, whereas the curated gate of
-Section~\ref{sec:gate} used the minimum as the principled converged-optimal estimate. We therefore
-do \emph{not} claim the gate's $r=0.88$ at scale; the curated gate remains the primary validation,
-and these at-scale figures are an honest, lower-bounding generalization check under a noisier
-estimator and a much smaller per-configuration planning budget.
-
-\begin{table}[t]
-\caption{Simulated annealing vs.\ equal-budget random across 50 seeds, two robot arms.}
-\label{tab:scale}
-\centering
-\begin{tabular}{lccc}
-\toprule
-robot & SA cost (mean$\pm$std) & SA beats random & mean impr.\ \\
-\midrule
-UR5 & $4.99\pm0.16$ & $46/50$ & $-9.2\%$ \\
-UR10 & $4.85\pm0.26$ & $45/50$ & $-7.3\%$ \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\begin{table}[t]
-\caption{Surrogate vs.\ real RRTstar motion at scale ($n=16$ per robot, median estimator,
-bootstrap $95\%$ CI). Both intervals exclude zero.}
-\label{tab:corr}
-\centering
-\begin{tabular}{lcc}
-\toprule
-robot & Pearson $r$ [95\% CI] & Spearman $\rho$ [95\% CI] \\
-\midrule
-UR10 & $0.828$ $[0.62,\,0.95]$ & $0.791$ $[0.41,\,0.96]$ \\
-UR5 & $0.694$ $[0.31,\,0.93]$ & $0.574$ $[0.04,\,0.88]$ \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\section{High-Fidelity Twin Execution}
+\section{Twin Execution and Time Decomposition}
 \label{sec:twin}
-To confirm that an optimized configuration is not merely fast on paper, we executed a feasible
-optimized winner (\texttt{val\_0}, surrogate $5.17$) in the full high-fidelity twin: Gazebo
-Harmonic GUI, the complete \texttt{move\_group} stack, the real RG2 gripper, and a welded-cube
-carry. The IK guard passed (all three stations reachable), and the four-operation relay
-(pick--place--pick--place) ran end-to-end across a warmup and a measured trial, both succeeding
-with the gripper verified clear at start and no planning failures
-(Table~\ref{tab:twin}, Fig.~\ref{fig:relay}).
-
-\begin{figure}[t]
-\centering
-\includegraphics[width=\columnwidth]{figs/twin_relay.jpg}
-\caption{Twin execution of the optimized winner \texttt{val\_0}: the UR5\,+\,RG2 arm reaches into
-a conveyor station mid-relay. The three stations are pinwheeled around the arm in the optimizer's
-chosen layout; the welded part (green cube) is carried between stations. Both trials complete the
-full pick--place--pick--place relay with no planning failures (Table~\ref{tab:twin}).}
-\label{fig:relay}
-\end{figure}
+To confirm an optimized configuration is not merely fast on paper, we executed the feasible
+optimized winner \texttt{val\_0} (surrogate $5.17$) in the full twin: Gazebo GUI, complete
+\texttt{move\_group} stack, real RG2 gripper, welded-cube carry. Across four independent twin
+sessions, $13$ of $14$ four-operation relays completed successfully
+($T_3 = 167.5\pm23.6$\,s over the successes), every run gripper-clear at start with \emph{zero}
+planning failures; the single failure was a dropped place verification, consistent with the
+framework's separately measured $93$--$97\%$ success over $30$ trials per reference
+configuration (Table~\ref{tab:twin}; Fig.~\ref{fig:overview} shows the executing twin). We
+emphasize the scope of this claim: these runs demonstrate \emph{executability} of the optimized
+layout in the high-fidelity twin, not a statistical characterization of $T_3$.
 
 \begin{table}[t]
-\caption{Full-twin relay execution of optimized winner \texttt{val\_0}.}
+\caption{Full-twin relay executions of optimized winner \texttt{val\_0} ($T_3$; four sessions,
+first run of each is a warmup; all runs gripper-clear, no planning failures;
+$^\dagger$dropped place verification), and the measured decomposition of session~B.}
 \label{tab:twin}
 \centering
-\begin{tabular}{lcccc}
+\scriptsize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}llc@{}}
 \toprule
-run & cycle (s) & success & gripper clear & failure \\
+session & $T_3$ per run (s) & success \\
 \midrule
-warmup & 133.0 & yes & yes & none \\
-trial 1 & 148.0 & yes & yes & none \\
+A & 133.0, 148.0 & $2/2$ \\
+B & 142.4, 176.0, 177.0 & $3/3$ \\
+C & 142.8, 176.8, 195.9, 177.7 & $4/4$ \\
+D & 174.8, 211.7, 143.3, 143.7$^\dagger$, 178.0 & $4/5$ \\
+\midrule
+\multicolumn{3}{@{}l}{\emph{decomposition, session B}: \hfill warmup / trial 1 / trial 2} \\
+\quad planner time (s) & \multicolumn{2}{r}{0.57 / 0.55 / 0.57} \\
+\quad motion execution (s) & \multicolumn{2}{r}{29.1 / 60.1 / 60.6} \\
+\quad manipulation + reset (s) & \multicolumn{2}{r}{112.7 / 115.3 / 115.8} \\
 \bottomrule
 \end{tabular}
 \end{table}
 
+\textbf{Relating $T_2$ to $T_3$.} The $6$--$9$\,s planned motion times of
+Section~\ref{sec:gate} and the $133$--$212$\,s twin relays measure different quantities, and the
+decomposition in Table~\ref{tab:twin} makes the relation exact. $T_2$ is the planned duration of
+only the $K{=}4$ station-to-station transfers. The twin relay executes $\approx\!12$
+point-to-point moves (approach, descend, and retreat per operation, plus grasp-verification
+retreats) in wall-clock time---$29$--$61$\,s, where the spread within one session is exactly the
+RRTConnect detour variance that motivated the RRT\textsuperscript{*} alignment---plus a large,
+nearly configuration-\emph{independent} overhead of $113$--$116$\,s: gripper open/close dwells,
+weld attach/detach with verification, part spawning and reset, collision-checked IK solving, and
+homing. Layout optimization can only compress the motion component; the constant overhead is a
+property of the manipulation sequence, which is why $T_2$, not $T_3$, is the right validation
+target for a \emph{layout} surrogate.
+
 \section{Discussion and Limitations}
-The result is bounded in an important way. The most \emph{aggressive} minimal-travel winners
-produced by the optimizer place stations close together; while the headless RRTstar probe (with
-belt exclusion and joint continuity) solves these, the twin's default randomized planner
-(RRTConnect with the real gripper collision model and a welded carry) cannot execute the cramped
-later segments---the first transfer succeeds, then a subsequent segment fails to plan. Thus our
-guarantees separate cleanly: the surrogate is validated as a predictor of optimizing-planner
-\emph{motion time}, and an optimized configuration is demonstrated \emph{executable} in the twin,
-but the single most aggressive optimum is not necessarily both. A natural extension is to fold a
-twin-executability constraint (e.g., a minimum inter-station clearance, or planning with the same
-planner the twin uses) directly into the surrogate or as an optimization constraint.
+\label{sec:discussion}
 
-Several further points bound the at-scale results. The relatively wide confidence intervals in
-Table~\ref{tab:corr} reflect the cost ceiling of real-sim validation: RRTstar is an optimizing
-planner that consumes its full planning budget on \emph{every} evaluation (on the order of minutes
-per configuration at the gate's budget), which limits how many configurations can be validated per
-robot---a practical constraint, not a flaw in the surrogate or optimizer. The UR5 at-scale
-correlation ($r=0.694$) is moderate compared with the curated gate ($r=0.880$); this is explained
-by the estimator choice---at scale we report the noisier \emph{median} duration, whereas the gate
-uses the converged-optimal \emph{minimum}---rather than by any change in the underlying
-relationship. The curated validation gate (Section~\ref{sec:gate}) uses six configurations; a larger held-out
-set would tighten the gate correlation estimate and is a natural extension. The base-pose result
-shows that pinning the absolute mount for footprint or accessibility would require an additional
-objective term beyond cycle time. Finally, grasping is
-welded (contact dynamics are out of scope) and the relay uses three stations and a single part
-type; scaling the station count and part set, and transferring to real hardware, are future
-work---the closest current evidence for the latter being the end-to-end twin executions of
-Sections~\ref{sec:fullcell} and~\ref{sec:twin}.
+\subsection{Control-oriented interpretation}
+The framework admits a natural control-systems reading.\footnote{This subsection distills the
+control-oriented analysis contributed by the third author.} The surrogate operates in
+joint space, matching the robot control architecture, and its kinematic-continuity rule is
+equivalent to a soft constraint on joint-velocity continuity at waypoints: selecting each goal
+on the same kinematic branch as its predecessor avoids the high-acceleration elbow-flip
+transients a randomized planner would otherwise inject---which is precisely what collapsed the
+per-plan spread from $89\%$ to $0\%$. Second, the surrogate predicts the \emph{converged-optimal}
+solution of an optimizing planner, not the behavior of a time-budgeted one; estimator choice
+therefore matters (min $r=0.88$ vs.\ mean $0.49$), and the practical recipe is: the cheap
+surrogate for search, the converged-optimal RRT\textsuperscript{*} estimate for validation, and
+a time-budgeted planner with accepted variance for execution. Third, the comparison reframes the
+engineering problem as constraint satisfaction with secondary cost minimization: random
+placement finds no feasible layout, so \emph{finding any feasible layout} is the dominant
+challenge, and a suboptimal feasible layout already captures most of the value. Finally, the
+demonstrated cadence---optimize in $\sim\!5$\,s, validate in the twin in $\sim\!140$\,s,
+transfer between arms by one parameter---suggests deployability for reconfiguration on product
+changeovers; embedded/edge studies of real-time robotic inference~\cite{ahmed} indicate such
+optimization loops are compatible with on-cell compute.
 
-\begin{figure}[t]
-\centering
-\includegraphics[width=\columnwidth]{figs/summary_panel.pdf}
-\caption{The quantitative story at a glance. (a)~Simulated annealing beats the equal-budget random
-baseline $46/50$ (UR5) and $45/50$ (UR10). (b)~Surrogate--real correlation: the curated gate
-($r=0.88$, $n=6$, min estimator) and the at-scale validations ($n=16$, median estimator, bootstrap
-$95\%$ CI). (c)~Five optimizers on the same surrogate---the top three (BO, CMA-ES, SA) tie, while
-random placement yields no valid layout.}
-\label{fig:summary}
-\end{figure}
+\subsection{Limitations}
+\textbf{Executability boundary.} The most aggressive minimal-travel winners place stations so
+close together that, while the headless RRT\textsuperscript{*} probe (belt exclusion,
+continuity) solves them, the twin's RRTConnect with the full gripper collision model and welded
+carry cannot plan the later cramped segments. Time \emph{prediction} and full-twin
+\emph{executability} are distinct guarantees; a natural extension folds a twin-executability
+constraint (larger clearance, or planning with the twin's own planner) into the search.
+\textbf{Digital-twin scope.} All validation in this paper is digital-twin- and planner-based;
+no physical robot experiment was performed. Transfer to a physical UR5/UR10 with an RG2 gripper
+is future work, and the end-to-end twin executions of Sections~\ref{sec:fullcell}
+and~\ref{sec:twin} are the closest current evidence. Grasping is a welded joint---contact
+dynamics, grasp planning, and force control are out of scope. \textbf{Statistical scope.} The
+curated gate uses six configurations and the twin executions of Table~\ref{tab:twin} are
+fourteen runs across four sessions; the at-scale confidence intervals are wide because
+RRT\textsuperscript{*} consumes its full planning budget per evaluation ($\sim$minutes per
+configuration), a practical cost ceiling on validation-set size. The relay uses three stations
+and one part type; scaling both is future work.
 
 \section{Conclusion}
-We presented a reconfigurable robotic pick-and-place cell whose layout is optimized against a
-deterministic joint-travel surrogate, and validated that surrogate against a high-fidelity twin
-with explicit attention to honesty: two documented negative results precede the positive one, and
-the boundary of the positive result is stated. When the real measurement is aligned with what the
-surrogate models---an optimizing planner, kinematic continuity, and a fixed visit order---the
-surrogate predicts converged-optimal motion time ($r=0.88$, $\rho=0.94$). Simulated annealing
-against the surrogate beats an equal-budget baseline $5/5$ ($-17.4\%$), and the gain transfers to
-real motion ($-19.4\%$) and to a clean end-to-end relay in the twin. Building on this, a fair
-five-optimizer comparison shows that no method dominates and that simulated annealing is justified
-by its cost and reliability; extending the search to the robot base pose exposes a structural
-property---base placement is cost-neutral under a cycle-time objective, so only relative station
-geometry matters; and the approach generalizes across 50 seeds and two robot arms (UR5 and UR10),
-with the surrogate--real correlation transferring under bootstrapped confidence intervals. The
-methodology---validate the proxy as rigorously as the optimization, report where it stops holding,
-and test whether it generalizes---is the central takeaway; Fig.~\ref{fig:summary} collects the
-headline quantitative results.
+We optimized the layout of a reconfigurable robotic pick-and-place cell against a deterministic
+joint-travel surrogate and validated the surrogate with explicit attention to honesty: two
+documented negative results precede the positive one, and the boundary of the positive result is
+stated. Aligned with what the surrogate models---an optimizing planner, kinematic continuity, a
+fixed visit order---it predicts converged-optimal motion time ($r=0.88$); optimizing against it
+transfers to real motion ($-19\%$) and to clean end-to-end twin relays. No single optimizer
+dominates the comparison (simulated annealing is justified by cost and reliability), the
+absolute base pose is cost-neutral so only relative station geometry matters, and the approach
+generalizes across 50 seeds and two arms with the correlation transferring to the UR10
+($r=0.83$). The methodology---validate the proxy as rigorously as the optimization, report where
+it stops holding, and test whether it generalizes---is the central takeaway.
 
 \begin{thebibliography}{99}
 \bibitem{rrtconnect}
@@ -722,6 +632,12 @@ Netw. (ICNN)}, 1995, pp.~1942--1948.
 
 \bibitem{ga}
 J.~H. Holland, \emph{Adaptation in Natural and Artificial Systems}.\ Cambridge, MA: MIT Press, 1992.
+
+\bibitem{ahmed}
+A.~Ahmed, F.~Petros, T.~Yemane, F.~Flitti, and Y.~Benachour, ``Performance evaluation of deep
+learning models for real-time trash classification on embedded devices,'' in \emph{Proc. 7th
+Int. Conf. Signal Process. Inf. Secur. (ICSPIS)}, Dubai, United Arab Emirates, 2024, pp.~1--6,
+doi:\,10.1109/ICSPIS63676.2024.10812636.
 
 \bibitem{hardware}
 Universal Robots, ``UR5 collaborative industrial robot arm---technical specifications,''

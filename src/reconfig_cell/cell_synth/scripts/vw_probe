@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""vw_probe — velocity-weighted surrogate variant check (reviewer question, ASET revision).
+
+    ros2 launch cell_synth synth.launch.py exe:=vw_probe valset:=<dir> ur_type:=ur10 n_ik:=16
+
+The production surrogate sums the DOMINANT-JOINT travel per segment (L-inf norm),
+implicitly treating all joints as equally fast. Under a velocity-limit-dominated motion
+profile the segment time is bounded below by max_j |dq_j| / vmax_j, so the natural
+"time-weighted" variant divides each joint's travel by its velocity limit before taking
+the max. For the UR5 all six joints share one limit (180 deg/s) and the two variants are
+IDENTICAL up to a constant factor (correlations invariant). For the UR10 the base and
+shoulder joints are slower (120 deg/s), so the weighting can genuinely reorder configs —
+this probe scores a valset with BOTH variants and correlates each against the existing
+real RRTstar motion measurements (motion.csv), answering the question empirically.
+
+Reuses the exact canonical-IK chain of surrogate_det (same seed bank, same branch
+selection), so the unweighted output must reproduce valset_surrogate.csv as a check.
+"""
+import csv
+import glob
+import math
+import os
+import sys
+
+import rclpy
+import yaml
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import synth_core as core  # noqa: E402
+
+from moveit.planning import MoveItPy  # noqa: E402
+
+# per-joint velocity limits (rad/s) from ur_description config/<ur_type>/joint_limits.yaml
+VMAX = {
+    "ur5": [math.radians(180)] * 6,
+    "ur10": [math.radians(120), math.radians(120)] + [math.radians(180)] * 4,
+}
+
+
+def _arg(name, default):
+    for a in sys.argv[1:]:
+        if a.startswith(f"{name}:="):
+            return a.split(":=", 1)[1]
+    return default
+
+
+def _pearson(xs, ys):
+    n = len(xs)
+    mx, my = sum(xs) / n, sum(ys) / n
+    num = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    dx = math.sqrt(sum((x - mx) ** 2 for x in xs))
+    dy = math.sqrt(sum((y - my) ** 2 for y in ys))
+    return num / (dx * dy) if dx and dy else float("nan")
+
+
+def _spearman(xs, ys):
+    def rank(v):
+        order = sorted(range(len(v)), key=lambda i: v[i])
+        r = [0] * len(v)
+        for i, idx in enumerate(order):
+            r[idx] = float(i)
+        return r
+    return _pearson(rank(xs), rank(ys))
+
+
+def main():
+    valset = _arg("valset", "")
+    n_ik = int(_arg("n_ik", "40"))
+    if not valset or not os.path.isdir(valset):
+        print(f"vw_probe: valset dir not found: {valset!r}", file=sys.stderr)
+        return 2
+    ur = os.environ.get("VW_URTYPE") or ("ur10" if "ur10" in valset else "ur5")
+    vmax = VMAX[ur]
+    print(f"[vw] valset={valset} ur_type={ur} n_ik={n_ik} vmax={[round(v,3) for v in vmax]}")
+
+    rclpy.init()
+    moveit = MoveItPy(node_name="cell_synth")
+    oracle = core.Oracle(moveit)
+    seedbank = oracle._seedbank(n_ik, 20240615)
+
+    rows = []
+    for path in sorted(glob.glob(os.path.join(valset, "val_*.yaml"))):
+        with open(path) as f:
+            doc = yaml.safe_load(f)
+        # same prep as motion_probe: fix the visit order by brute-force TSP so the scores
+        # are apples-to-apples with motion.csv's surrogate column
+        order = oracle.tsp_order(doc, n_ik=n_ik)
+        doc = dict(doc)
+        doc["task"] = core.relay_from_order(order)
+        _, task_spec, _ = core.realize(core.make_cell(doc, "vw"))
+        prev = list(core.GUARD.UP_SEED)
+        tot = tot_w = 0.0
+        ok = True
+        for op in task_spec.get("ops", []):
+            q = oracle._canonical_ik(core._to_pose(op["target_pose"]), seedbank)
+            if q is None:
+                ok = False
+                break
+            d = [abs(a - b) for a, b in zip(q, prev)]
+            tot += max(d)                                    # production L-inf surrogate
+            tot_w += max(dj / vj for dj, vj in zip(d, vmax))  # velocity-weighted (time bound, s)
+            prev = q
+        label = os.path.basename(path).replace(".yaml", "")
+        if ok:
+            rows.append((label, round(tot, 4), round(tot_w, 4)))
+            print(f"[vw] {label}: unweighted={tot:.4f} weighted={tot_w:.4f}s")
+        else:
+            print(f"[vw] {label}: IK incomplete, skipped")
+
+    mot = {}
+    mpath = os.path.join(valset, "motion.csv")
+    if os.path.exists(mpath):
+        with open(mpath) as f:
+            for r in csv.DictReader(f):
+                mot[r["label"]] = {k: float(r[k]) for k in
+                                   ("motion_min", "motion_median", "motion_mean")}
+
+    out = os.path.join(valset, "vw_surrogate.csv")
+    with open(out, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["label", "surrogate_unweighted", "surrogate_vweighted_s",
+                    "motion_min", "motion_median"])
+        for label, t, tw in rows:
+            m = mot.get(label, {})
+            w.writerow([label, t, tw, m.get("motion_min", ""), m.get("motion_median", "")])
+
+    paired = [(t, tw, mot[label]) for label, t, tw in rows if label in mot]
+    if paired:
+        for est in ("motion_min", "motion_median"):
+            xs = [p[0] for p in paired]
+            xw = [p[1] for p in paired]
+            ys = [p[2][est] for p in paired]
+            print(f"[vw:{ur}] n={len(paired)} est={est}  "
+                  f"unweighted r={_pearson(xs, ys):.3f} rho={_spearman(xs, ys):.3f}  |  "
+                  f"weighted r={_pearson(xw, ys):.3f} rho={_spearman(xw, ys):.3f}")
+    print(f"[vw] wrote {out}")
+    os._exit(0)  # moveit_py segfaults on teardown; exit before it corrupts the code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

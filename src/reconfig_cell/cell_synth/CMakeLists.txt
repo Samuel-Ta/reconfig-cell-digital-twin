@@ -15,6 +15,7 @@ install(PROGRAMS
   scripts/plot_compare.py
   scripts/valset
   scripts/motion_probe
+  scripts/vw_probe
   scripts/plot_results.py
   DESTINATION lib/${PROJECT_NAME}
 )
