@@ -66,6 +66,11 @@ ros2 launch cell_bringup cell_warehouse.launch.py config:=config_2
 
 Switching `config:=config_1` → `config:=config_2` changes station layout, conveyor set, and task purely through the generated config — no code changes.
 
+<p align="center">
+  <img src="docs/img/twin_live_capture.png" width="720" alt="Live capture of the UR5+RG2 cell inside the Intel-warehouse world: elevated conveyor, pallet racking, and safety fencing">
+  <br><sub>Live screenshot of <code>warehouse_cell.launch.py</code> running in Gazebo — captured straight from the running sim, not a paper figure.</sub>
+</p>
+
 ## Paper
 
 A submission draft describing the surrogate, its validation, and the optimizer comparison lives in [`src/reconfig_cell/paper/`](src/reconfig_cell/paper/) (`main_ieee.tex`).
